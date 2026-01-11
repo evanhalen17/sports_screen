@@ -1,0 +1,9 @@
+env/
+venv/
+data/API/key.env
+*.pyc
+__pycache__/
+.env
+*.egg-info/
+dist/
+build/

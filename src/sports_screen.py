@@ -1,0 +1,655 @@
+#! .\SportsbookOdds\env\Scripts\python.exe
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QVBoxLayout, QWidget,
+    QLabel, QScrollArea, QTableWidget, QTableWidgetItem,
+    QHeaderView, QHBoxLayout, QCheckBox, QComboBox,
+    QPushButton, QDoubleSpinBox
+)
+from PyQt6.QtCore import Qt
+import sys
+from the_odds_api import OddsAPI
+from config import (
+    PALETTE, THEODDSAPI_KEY_TEST, THEODDSAPI_KEY_PROD, ODDS_FORMAT
+)
+from utils import kelly_criterion, odds_converter, set_stylesheet, convert_to_eastern
+from rich import print
+
+
+class StartupWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Odds and Edge")
+        self.setGeometry(100, 100, 600, 400)
+
+        self.sportsbook_mapping = {
+            "betonlineag": "BetOnline.ag",
+            "betmgm": "BetMGM",
+            "betrivers": "BetRivers",
+            "betus": "BetUS",
+            "bovada": "Bovada",
+            "williamhill_us": "Caesars",
+            "draftkings": "DraftKings",
+            "fanatics": "Fanatics",
+            "fanduel": "FanDuel",
+            "kalshi": "Kalshi",
+            "lowvig": "LowVig.ag",
+            "mybookieag": "MyBookie.ag",
+            "ballybet": "Bally Bet",
+            "espnbet": "ESPN BET",
+            "pointsbet": "PointsBet",
+            "pinnacle": "Pinnacle",
+            "prophetx": "ProphetX"
+        }
+
+        self.selected_accounts = {}
+        self.display_sportsbooks = []
+
+        # Central widget and layout
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.welcome_label = QLabel("Welcome to Odds and Edge", self)
+        self.welcome_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        main_layout.addWidget(self.welcome_label)
+
+        self.user_sportsbooks_button = QPushButton("Set Up User Sportsbooks", self)
+        self.user_sportsbooks_button.clicked.connect(self.open_user_sportsbook_selection)
+        main_layout.addWidget(self.user_sportsbooks_button)
+
+        self.current_odds_button = QPushButton("Monitor Current Odds", self)
+        self.current_odds_button.clicked.connect(self.open_current_odds)
+        main_layout.addWidget(self.current_odds_button)
+
+        self.historical_analysis_button = QPushButton("Review Historical Betslips", self)
+        self.historical_analysis_button.clicked.connect(self.open_historical_analysis)
+        main_layout.addWidget(self.historical_analysis_button)
+
+    def open_user_sportsbook_selection(self):
+        self.user_sportsbook_window = UserSportsbookSelectionWindow(self.sportsbook_mapping)
+        self.user_sportsbook_window.show()
+        self.user_sportsbook_window.save_button.clicked.connect(self.save_user_accounts)
+
+    def save_user_accounts(self):
+        self.selected_accounts, self.display_sportsbooks = self.user_sportsbook_window.get_selections()
+        print("User Sportsbook Accounts Saved:", self.selected_accounts)
+        print("Display Sportsbooks Selected:", self.display_sportsbooks)
+
+    def open_current_odds(self):
+        if not self.selected_accounts:
+            print("Error: User sportsbooks must be set up before viewing current odds.")
+            return
+
+        self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
+        self.sport_selection_window.show()
+        self.close()
+
+    def open_historical_analysis(self):
+        self.historical_analysis_window = HistoricalAnalysisWindow()
+        self.historical_analysis_window.show()
+        self.close()
+
+
+class UserSportsbookSelectionWindow(QMainWindow):
+    def __init__(self, sportsbook_mapping):
+        super().__init__()
+        self.setWindowTitle("User Sportsbook Selection")
+        self.setGeometry(100, 100, 600, 400)
+
+        self.sportsbook_mapping = sportsbook_mapping
+        self.selected_accounts = {}
+        self.display_sportsbooks = []
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.label = QLabel("Select your sportsbooks and enter bankrolls (leave $0 for display-only):", self)
+        main_layout.addWidget(self.label)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area_widget = QWidget()
+        self.scroll_area_layout = QVBoxLayout(self.scroll_area_widget)
+
+        self.sportsbook_widgets = {}
+        for key, title in self.sportsbook_mapping.items():
+            checkbox = QCheckBox(title, self)
+            bankroll_input = QDoubleSpinBox(self)
+            bankroll_input.setRange(0.0, 1000000.0)
+            bankroll_input.setPrefix("$")
+            bankroll_input.setDecimals(2)
+
+            self.sportsbook_widgets[key] = (checkbox, bankroll_input)
+
+            h_layout = QHBoxLayout()
+            h_layout.addWidget(checkbox)
+            h_layout.addWidget(bankroll_input)
+
+            container = QWidget()
+            container.setLayout(h_layout)
+            self.scroll_area_layout.addWidget(container)
+
+        self.scroll_area.setWidget(self.scroll_area_widget)
+        self.scroll_area.setWidgetResizable(True)
+        main_layout.addWidget(self.scroll_area)
+
+        self.select_all_button = QPushButton("Select All", self)
+        self.select_all_button.clicked.connect(self.select_all)
+        main_layout.addWidget(self.select_all_button)
+
+        self.deselect_all_button = QPushButton("Clear Selections", self)
+        self.deselect_all_button.clicked.connect(self.deselect_all)
+        main_layout.addWidget(self.deselect_all_button)
+
+        self.save_button = QPushButton("Save", self)
+        self.save_button.clicked.connect(self.save_selections)
+        main_layout.addWidget(self.save_button)
+
+    def select_all(self):
+        for _, widget in self.sportsbook_widgets.items():
+            widget[0].setChecked(True)
+    
+    def deselect_all(self):
+        for _, widget in self.sportsbook_widgets.items():
+            widget[0].setChecked(False)
+
+    def save_selections(self):
+        self.selected_accounts = {
+            key: widget[1].value()
+            for key, widget in self.sportsbook_widgets.items()
+            if widget[0].isChecked() and widget[1].value() > 0
+        }
+        self.display_sportsbooks = [
+            key for key, widget in self.sportsbook_widgets.items()
+            if widget[0].isChecked()
+        ]
+        print("Saved Accounts:", self.selected_accounts)
+        print("Display Sportsbooks:", self.display_sportsbooks)
+        self.close()
+
+    def get_selections(self):
+        return self.selected_accounts, self.display_sportsbooks
+
+
+class SportSelectionWindow(QMainWindow):
+    def __init__(self, sportsbook_mapping, selected_accounts, display_sportsbooks):
+        super().__init__()
+        self.setWindowTitle("Select Sports")
+        self.setGeometry(100, 100, 600, 400)
+
+        self.sportsbook_mapping = sportsbook_mapping
+        self.selected_accounts = selected_accounts
+        self.display_sportsbooks = display_sportsbooks
+        self.selected_sports = []  # Allow multiple selections
+        self.sport_mapping = {}
+        self.has_outrights = {}
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.label = QLabel("Select the sports you are interested in:", self)
+        main_layout.addWidget(self.label)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area_widget = QWidget()
+        self.scroll_area_layout = QVBoxLayout(self.scroll_area_widget)
+
+        self.sports_checkboxes = []
+        sports = self.fetch_sports()
+        for sport in sports:
+            checkbox = QCheckBox(sport['title'], self)
+            checkbox.setChecked(False)
+            self.sports_checkboxes.append(checkbox)
+            self.sport_mapping[sport['title']] = sport['key']
+            self.has_outrights[sport['key']] = sport['has_outrights']
+            self.scroll_area_layout.addWidget(checkbox)
+
+        self.scroll_area.setWidget(self.scroll_area_widget)
+        self.scroll_area.setWidgetResizable(True)
+        main_layout.addWidget(self.scroll_area)
+
+        self.next_button = QPushButton("Next", self)
+        self.next_button.clicked.connect(self.open_next_window)
+        main_layout.addWidget(self.next_button)
+
+        self.back_button = QPushButton("Back", self)
+        self.back_button.clicked.connect(self.go_back)
+        main_layout.addWidget(self.back_button)
+
+    def fetch_sports(self):
+        try:
+            return odds_api.get_sports()
+        except Exception as e:
+            print(f"Error fetching sports: {e}")
+            return []
+
+    def open_next_window(self):
+        selected_sport_titles = [
+            cb.text() for cb in self.sports_checkboxes if cb.isChecked()
+        ]
+        if not selected_sport_titles:
+            print("Error: No sports selected.")
+            return
+
+        self.selected_sports = [self.sport_mapping[title] for title in selected_sport_titles]
+
+        futures_sports = [sport for sport in self.selected_sports if self.has_outrights[sport]]
+        non_futures_sports = [sport for sport in self.selected_sports if not self.has_outrights[sport]]
+
+        if futures_sports and non_futures_sports:
+            print("Error: Cannot mix futures and non-futures sports.")
+            return
+
+        if futures_sports:
+            self.futures_odds_window = FuturesOddsWindow(
+                futures_sports, self.selected_accounts, self.sportsbook_mapping, self.display_sportsbooks
+            )
+            self.futures_odds_window.show()
+        elif non_futures_sports:
+            self.current_odds_window = CurrentOddsWindow(
+                non_futures_sports, self.selected_accounts, self.sportsbook_mapping, self.display_sportsbooks
+            )
+            self.current_odds_window.show()
+
+        self.close()
+
+    def go_back(self):
+        self.startup_window = StartupWindow()
+        self.startup_window.show()
+        self.close()
+
+
+class CurrentOddsWindow(QMainWindow):
+    def __init__(self, selected_sports, selected_accounts, sportsbook_mapping, display_sportsbooks):
+        super().__init__()
+        self.setWindowTitle("Current Odds")
+        self.setGeometry(100, 100, 1200, 800)
+
+        self.selected_sports = selected_sports
+        self.current_sport = selected_sports[0]  # Default to the first sport in the list
+        self.selected_accounts = selected_accounts
+        self.sportsbook_mapping = sportsbook_mapping
+        self.display_sportsbooks = display_sportsbooks
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
+        main_layout.addWidget(self.requests_remaining_label)
+
+        # Sport Selection Dropdown
+        self.sport_dropdown = QComboBox(self)
+        self.sport_dropdown.addItems(self.selected_sports)
+        self.sport_dropdown.currentTextChanged.connect(self.update_sport)
+        main_layout.addWidget(self.sport_dropdown)
+
+        # Market Selection Dropdown
+        self.market_dropdown = QComboBox(self)
+        self.market_dropdown.addItems(["h2h", "spreads", "totals"])
+        self.market_dropdown.currentTextChanged.connect(self.update_table)
+        main_layout.addWidget(self.market_dropdown)
+
+        self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
+        main_layout.addWidget(self.table)
+        self.update_table()
+
+        button_layout = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.update_table)
+        button_layout.addWidget(self.refresh_button)
+
+        self.back_button = QPushButton("Back to Sport Selection", self)
+        self.back_button.clicked.connect(self.go_back)
+        button_layout.addWidget(self.back_button)
+
+        main_layout.addLayout(button_layout)
+
+        self.update_requests_remaining()
+
+    def update_sport(self, sport):
+        self.current_sport = sport
+        self.update_table()
+
+    def update_table(self):
+        self.table.clear()
+        self.table.setRowCount(0)
+
+        try:
+            odds_data = self.fetch_odds_data()
+            self.process_odds_data(odds_data)
+            self.add_headers()
+            for event in odds_data:
+                self.populate_table_rows(event)
+            self.update_requests_remaining()
+            self.table.resizeColumnsToContents()
+
+        except Exception as e:
+            print(f"Error updating table: {e}")
+
+    def fetch_odds_data(self):
+        response = odds_api.get_odds(
+            sport=self.current_sport,
+            markets=self.market_dropdown.currentText(),
+            odds_format=ODDS_FORMAT,
+            bookmakers=','.join(self.display_sportsbooks)
+        )
+        print(response)
+        return response
+
+    def process_odds_data(self, odds_data):
+        for event in odds_data:
+            for bookmaker in event['bookmakers']:
+                for market in bookmaker['markets']:
+                    total_prob = sum(
+                        odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        for outcome in market["outcomes"]
+                    )
+                    for outcome in market["outcomes"]:
+                        prob = odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        no_vig_prob = prob / total_prob if total_prob > 0 else 0
+                        outcome["no_vig_price"] = odds_converter("probability", ODDS_FORMAT, no_vig_prob)
+
+    def add_headers(self):
+        headers = ["Event", "Event Date", "Outcome"] + [
+            self.sportsbook_mapping[bookmaker]
+            for bookmaker in self.display_sportsbooks
+        ] + ["Consensus Odds", "Positive Edge", "Kelly Bet", "Best Sportsbook"]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def populate_table_rows(self, event):
+        for outcome in event['bookmakers'][0]['markets'][0]['outcomes']:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(f"{event['home_team']} vs {event['away_team']}"))
+            self.table.setItem(row, 1, QTableWidgetItem(convert_to_eastern(event['commence_time'])))
+            self.table.setItem(row, 2, QTableWidgetItem(outcome['name']))
+
+            probabilities = []
+            weights = []
+            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=3):
+                bookmaker = next((b for b in event['bookmakers'] if b['key'] == bookmaker_key), None)
+                if bookmaker:
+                    market = next((m for m in bookmaker['markets'] if m['key'] == self.market_dropdown.currentText()), None)
+                    if market:
+                        outcome_data = next((o for o in market['outcomes'] if o['name'] == outcome['name']), None)
+                        if outcome_data:
+                            self.table.setItem(row, col, QTableWidgetItem(str(outcome_data["price"])))
+                            probabilities.append(odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"]))
+
+                            # Apply weighting for Pinnacle
+                            weight = 10 if bookmaker_key == "pinnacle" else 1
+                            weights.append(weight)
+
+            if probabilities:
+                consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
+                consensus_odds = odds_converter("probability", ODDS_FORMAT, consensus_probability)
+
+                # Correct column alignment
+                consensus_col = len(self.display_sportsbooks) + 3
+                edge_col = len(self.display_sportsbooks) + 4
+                kelly_col = len(self.display_sportsbooks) + 5
+                best_sportsbook_col = len(self.display_sportsbooks) + 6
+
+                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+
+                # Calculate Positive Edge and Kelly Bet based on user-selected sportsbooks
+                best_sportsbook = None
+                best_edge = -float('inf')
+                best_kelly = 0
+
+                for account_key in self.selected_accounts:
+                    user_market = next(
+                        (m for b in event['bookmakers'] if b['key'] == account_key for m in b['markets'] if m['key'] == self.market_dropdown.currentText()),
+                        None
+                    )
+                    if user_market:
+                        user_outcome = next((o for o in user_market["outcomes"] if o["name"] == outcome['name']), None)
+                        if user_outcome:
+                            user_probability = odds_converter(ODDS_FORMAT, "probability", user_outcome["price"])
+                            edge = consensus_probability - user_probability
+                            kelly = kelly_criterion(
+                                consensus_probability, odds_converter(ODDS_FORMAT, "decimal", user_outcome["price"])
+                            )
+
+                            if edge > best_edge:
+                                best_edge = edge
+                                best_kelly = kelly
+                                best_sportsbook = account_key
+
+                self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
+                self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
+                self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
+
+    def update_requests_remaining(self):
+        try:
+            requests_remaining = odds_api.get_remaining_requests()
+            self.requests_remaining_label.setText(f"Requests Remaining: {requests_remaining}")
+        except Exception as e:
+            print(f"Error fetching requests remaining: {e}")
+            self.requests_remaining_label.setText("Requests Remaining: Error")
+
+    def go_back(self):
+        self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
+        self.sport_selection_window.show()
+        self.close()
+
+
+class FuturesOddsWindow(QMainWindow):
+    def __init__(self, selected_sports, selected_accounts, sportsbook_mapping, display_sportsbooks):
+        super().__init__()
+        self.setWindowTitle("Futures Odds")
+        self.setGeometry(100, 100, 1200, 800)
+
+        self.selected_sports = selected_sports if isinstance(selected_sports, list) else [selected_sports]
+        self.current_sport = self.selected_sports[0]  # Default to the first sport in the list
+        self.selected_accounts = selected_accounts
+        self.sportsbook_mapping = sportsbook_mapping
+        self.display_sportsbooks = display_sportsbooks
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
+        main_layout.addWidget(self.requests_remaining_label)
+
+        # Sport Selection Dropdown
+        self.sport_dropdown = QComboBox(self)
+        self.sport_dropdown.addItems(self.selected_sports)
+        self.sport_dropdown.currentTextChanged.connect(self.update_sport)
+        main_layout.addWidget(self.sport_dropdown)
+
+        self.table = QTableWidget()
+        self.table.setAlternatingRowColors(True)
+        main_layout.addWidget(self.table)
+        self.update_table()
+
+        button_layout = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.update_table)
+        button_layout.addWidget(self.refresh_button)
+
+        self.back_button = QPushButton("Back to Sport Selection", self)
+        self.back_button.clicked.connect(self.go_back)
+        button_layout.addWidget(self.back_button)
+
+        main_layout.addLayout(button_layout)
+
+        self.update_requests_remaining()
+
+    def update_sport(self, sport):
+        self.current_sport = sport
+        self.update_table()
+
+    def update_table(self):
+        self.table.clear()
+        self.table.setRowCount(0)
+
+        try:
+            odds_data = self.fetch_odds_data()
+            self.process_odds_data(odds_data)
+            self.add_headers()
+            for event in odds_data:
+                self.populate_table_rows(event)
+            self.update_requests_remaining()
+            self.table.resizeColumnsToContents()
+
+        except Exception as e:
+            print(f"Error updating table: {e}")
+
+    def fetch_odds_data(self):
+        response = odds_api.get_odds(
+            sport=self.current_sport,
+            markets="outrights",
+            odds_format=ODDS_FORMAT,
+            bookmakers=','.join(self.display_sportsbooks)
+        )
+        print(response)
+        return response
+
+    def process_odds_data(self, odds_data):
+        for event in odds_data:
+            for bookmaker in event['bookmakers']:
+                for market in bookmaker['markets']:
+                    total_prob = sum(
+                        odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        for outcome in market["outcomes"]
+                    )
+                    for outcome in market["outcomes"]:
+                        prob = odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        no_vig_prob = prob / total_prob if total_prob > 0 else 0
+                        outcome["no_vig_price"] = odds_converter("probability", ODDS_FORMAT, no_vig_prob)
+
+    def add_headers(self):
+        headers = ["Team"] + [
+            self.sportsbook_mapping[bookmaker]
+            for bookmaker in self.display_sportsbooks
+        ] + ["Consensus Odds", "Positive Edge", "Kelly Bet", "Best Sportsbook"]
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+
+    def populate_table_rows(self, event):
+        for outcome in event['bookmakers'][0]['markets'][0]['outcomes']:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(outcome['name']))
+
+            probabilities = []
+            weights = []
+            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=1):
+                bookmaker = next((b for b in event['bookmakers'] if b['key'] == bookmaker_key), None)
+                if bookmaker:
+                    market = next((m for m in bookmaker['markets'] if m['key'] == "outrights"), None)
+                    if market:
+                        outcome_data = next((o for o in market['outcomes'] if o['name'] == outcome['name']), None)
+                        if outcome_data:
+                            self.table.setItem(row, col, QTableWidgetItem(str(outcome_data["price"])))
+                            probabilities.append(odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"]))
+
+                            # Apply weighting for Pinnacle
+                            weight = 10 if bookmaker_key == "pinnacle" else 1
+                            weights.append(weight)
+
+            if probabilities:
+                consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
+                consensus_odds = odds_converter("probability", ODDS_FORMAT, consensus_probability)
+
+                # Correct column alignment
+                consensus_col = len(self.display_sportsbooks) + 1
+                edge_col = len(self.display_sportsbooks) + 2
+                kelly_col = len(self.display_sportsbooks) + 3
+                best_sportsbook_col = len(self.display_sportsbooks) + 4
+
+                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+
+                # Calculate Positive Edge and Kelly Bet based on user-selected sportsbooks
+                best_sportsbook = None
+                best_edge = -float('inf')
+                best_kelly = 0
+
+                for account_key in self.selected_accounts:
+                    user_market = next(
+                        (m for b in event['bookmakers'] if b['key'] == account_key for m in b['markets'] if m['key'] == "outrights"),
+                        None
+                    )
+                    if user_market:
+                        user_outcome = next((o for o in user_market["outcomes"] if o["name"] == outcome['name']), None)
+                        if user_outcome:
+                            user_probability = odds_converter(ODDS_FORMAT, "probability", user_outcome["price"])
+                            edge = consensus_probability - user_probability
+                            kelly = kelly_criterion(
+                                consensus_probability, odds_converter(ODDS_FORMAT, "decimal", user_outcome["price"])
+                            )
+
+                            if edge > best_edge:
+                                best_edge = edge
+                                best_kelly = kelly
+                                best_sportsbook = account_key
+
+                self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
+                self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
+                self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
+
+    def update_requests_remaining(self):
+        try:
+            requests_remaining = odds_api.get_remaining_requests()
+            self.requests_remaining_label.setText(f"Requests Remaining: {requests_remaining}")
+        except Exception as e:
+            print(f"Error fetching requests remaining: {e}")
+            self.requests_remaining_label.setText("Requests Remaining: Error")
+
+    def go_back(self):
+        self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
+        self.sport_selection_window.show()
+        self.close()
+
+
+class HistoricalAnalysisWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Historical Analysis")
+        self.setGeometry(100, 100, 800, 600)
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        self.label = QLabel("Historical Analysis is under development. This feature will allow users to review and analyze betslips over time.", self)
+        main_layout.addWidget(self.label)
+
+        self.back_button = QPushButton("Back to Startup", self)
+        self.back_button.clicked.connect(self.go_back)
+        main_layout.addWidget(self.back_button)
+
+    def go_back(self):
+        self.startup_window = StartupWindow()
+        self.startup_window.show()
+        self.close()
+
+
+if __name__ == "__main__":
+    # Initialize the OddsAPI instance
+    odds_api = OddsAPI(THEODDSAPI_KEY_PROD)
+
+    # Initialize the App
+    app = QApplication(sys.argv)
+
+    # Initialize GUI formatting
+    stylesheet = set_stylesheet(PALETTE)
+    app.setStyleSheet(stylesheet)
+
+    # Run App
+    startup_window = StartupWindow()
+    startup_window.show()
+    sys.exit(app.exec())
