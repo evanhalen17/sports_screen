@@ -3,9 +3,11 @@
 import os
 import json
 import re
-from typing import Generator, Union
+from typing import Generator, Union, Optional, Dict, List
 from datetime import datetime, timedelta
 import pytz
+import tempfile
+import time
 
 def save_to_json(json_response, directory, file_name) -> None:
     if not os.path.exists(directory):
@@ -247,6 +249,191 @@ def set_stylesheet(palette: dict[str: str]) -> str:
         background-color: {palette['combobox-hover']};
     }}
     """
+
+
+def fetch_event_ids_for_sports(
+    odds_api,
+    sport_keys: Optional[List[str]] = None,
+    commence_time_from: Optional[str] = None,
+    commence_time_to: Optional[str] = None,
+    cache_ttl: int = 300,
+    cache_file: Optional[str] = None,
+) -> Dict[str, List[str]]:
+    """
+    Fetch event IDs for the given sports using the provided `odds_api` client.
+
+    - If `sport_keys` is None, the function will call `odds_api.get_sports()` to
+      discover available sports.
+    - Results are cached to a temp file for `cache_ttl` seconds to avoid
+      repeated network calls. The cache file location may be overridden with
+      `cache_file`.
+
+    Returns a mapping of `sport_key` -> list of event ids.
+    """
+    if cache_file is None:
+        cache_file = os.path.join(tempfile.gettempdir(), 'sports_screen_event_ids_cache.json')
+
+    now = int(time.time())
+    # return cached results when available and fresh
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                cache = json.load(f)
+            if cache.get('timestamp', 0) + cache_ttl > now:
+                return cache.get('event_ids', {})
+        except Exception:
+            pass
+
+    event_ids: Dict[str, List[str]] = {}
+
+    # discover sports if not provided
+    if sport_keys is None:
+        try:
+            sports = odds_api.get_sports()
+            sport_keys = [s['key'] for s in sports]
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch sports from OddsAPI: {exc}")
+
+    for sk in sport_keys:
+        try:
+            events = odds_api.get_events(sk, commence_time_from=commence_time_from, commence_time_to=commence_time_to)
+            # some endpoints may wrap results in a 'data' key
+            if isinstance(events, dict) and 'data' in events:
+                evs = events.get('data', [])
+            else:
+                evs = events or []
+
+            ids = [e['id'] for e in evs if 'id' in e]
+            if ids:
+                event_ids[sk] = ids
+        except Exception:
+            # Skip sports that fail to return events
+            continue
+
+    # persist cache (best-effort)
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump({'timestamp': now, 'event_ids': event_ids}, f)
+    except Exception:
+        pass
+
+    return event_ids
+
+
+def get_all_event_ids_flat(
+    odds_api,
+    sport_keys: Optional[List[str]] = None,
+    commence_time_from: Optional[str] = None,
+    commence_time_to: Optional[str] = None,
+    cache_ttl: int = 300,
+    cache_file: Optional[str] = None,
+) -> List[str]:
+    """Return a deduplicated flat list of event ids across requested sports."""
+    mapping = fetch_event_ids_for_sports(
+        odds_api,
+        sport_keys=sport_keys,
+        commence_time_from=commence_time_from,
+        commence_time_to=commence_time_to,
+        cache_ttl=cache_ttl,
+        cache_file=cache_file,
+    )
+    seen = set()
+    flat: List[str] = []
+    for ids in mapping.values():
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                flat.append(i)
+    return flat
+
+
+def compute_consensus_point(event: dict, market_type: str = 'spreads', pinnacle_weight: int = 10):
+    """
+    Compute a consensus point for an event.
+
+    For 'spreads' this returns a signed point where negative means the home team is favored.
+    For 'totals' this returns a positive total value.
+
+    Returns (consensus_point: float|None, favorite: str|None)
+    """
+    if not isinstance(event, dict):
+        return None, None
+
+    if market_type == 'spreads':
+        home = event.get('home_team')
+        away = event.get('away_team')
+        if not home or not away:
+            return None, None
+
+        team_points = {home: [], away: []}
+        team_weights = {home: [], away: []}
+
+        for bookmaker in event.get('bookmakers', []):
+            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == 'spreads'), None)
+            if not market:
+                continue
+            weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
+            for outcome in market.get('outcomes', []):
+                if 'point' in outcome and outcome['point'] is not None:
+                    try:
+                        p = float(outcome['point'])
+                    except Exception:
+                        continue
+                    name = outcome.get('name', '')
+                    if name == home or home in name:
+                        team_points[home].append(p)
+                        team_weights[home].append(weight)
+                    elif name == away or away in name:
+                        team_points[away].append(p)
+                        team_weights[away].append(weight)
+
+        avg_home = None
+        avg_away = None
+        if team_weights[home] and sum(team_weights[home]) > 0:
+            avg_home = sum(p * w for p, w in zip(team_points[home], team_weights[home])) / sum(team_weights[home])
+        if team_weights[away] and sum(team_weights[away]) > 0:
+            avg_away = sum(p * w for p, w in zip(team_points[away], team_weights[away])) / sum(team_weights[away])
+
+        consensus_point = None
+        favorite = None
+        if avg_home is not None:
+            consensus_point = avg_home
+        elif avg_away is not None:
+            consensus_point = -avg_away
+
+        if consensus_point is not None:
+            target_point = round(consensus_point * 2) / 2.0
+            if target_point < 0:
+                favorite = home
+            elif target_point > 0:
+                favorite = away
+            return target_point, favorite
+        return None, None
+
+    if market_type == 'totals':
+        pts = []
+        wts = []
+        for bookmaker in event.get('bookmakers', []):
+            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == 'totals'), None)
+            if not market:
+                continue
+            weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
+            for outcome in market.get('outcomes', []):
+                if 'point' in outcome and outcome['point'] is not None:
+                    try:
+                        p = abs(float(outcome['point']))
+                    except Exception:
+                        continue
+                    pts.append(p)
+                    wts.append(weight)
+
+        if pts and wts and sum(wts) > 0:
+            weighted_avg = sum(p * w for p, w in zip(pts, wts)) / sum(wts)
+            target_point = round(weighted_avg * 2) / 2.0
+            return target_point, None
+
+    return None, None
+
 
 if __name__ == '__main__':
     

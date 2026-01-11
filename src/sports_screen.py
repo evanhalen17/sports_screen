@@ -6,13 +6,19 @@ from PyQt6.QtWidgets import (
     QHeaderView, QHBoxLayout, QCheckBox, QComboBox,
     QPushButton, QDoubleSpinBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
 import sys
 from the_odds_api import OddsAPI
 from config import (
     PALETTE, THEODDSAPI_KEY_TEST, THEODDSAPI_KEY_PROD, ODDS_FORMAT
 )
-from utils import kelly_criterion, odds_converter, set_stylesheet, convert_to_eastern
+from utils import (
+    kelly_criterion,
+    odds_converter,
+    set_stylesheet,
+    convert_to_eastern,
+    get_all_event_ids_flat,
+)
 from rich import print
 
 
@@ -256,12 +262,107 @@ class SportSelectionWindow(QMainWindow):
             )
             self.current_odds_window.show()
 
+            # start background fetch of event ids for the selected sports
+            try:
+                self._event_ids_worker = EventIdsWorker(odds_api, non_futures_sports)
+                self._event_ids_worker.finished.connect(self._on_event_ids_fetched)
+                self._event_ids_worker.start()
+            except Exception as e:
+                print(f"Failed to start event id worker: {e}")
+
         self.close()
 
     def go_back(self):
         self.startup_window = StartupWindow()
         self.startup_window.show()
         self.close()
+
+    def _on_event_ids_fetched(self, mapping):
+        try:
+            if hasattr(self, 'current_odds_window') and self.current_odds_window:
+                self.current_odds_window.set_event_ids_map(mapping)
+        except Exception as e:
+            print(f"Error applying fetched event ids: {e}")
+
+
+class EventIdsWorker(QThread):
+    """Background worker to fetch event id mappings for sports."""
+    finished = pyqtSignal(dict)
+
+    def __init__(self, odds_api, sport_keys, commence_time_from=None, commence_time_to=None, cache_ttl=300, cache_file=None):
+        super().__init__()
+        self.odds_api = odds_api
+        self.sport_keys = sport_keys
+        self.commence_time_from = commence_time_from
+        self.commence_time_to = commence_time_to
+        self.cache_ttl = cache_ttl
+        self.cache_file = cache_file
+
+    def run(self):
+        try:
+            mapping = fetch_event_ids_for_sports(
+                self.odds_api,
+                sport_keys=self.sport_keys,
+                commence_time_from=self.commence_time_from,
+                commence_time_to=self.commence_time_to,
+                cache_ttl=self.cache_ttl,
+                cache_file=self.cache_file,
+            )
+            # Emit the per-sport mapping directly: {sport_key: [event_ids]}
+            self.finished.emit(mapping)
+        except Exception:
+            # Emit empty mapping on failure
+            self.finished.emit({})
+
+    def open_next_window(self):
+        selected_sport_titles = [
+            cb.text() for cb in self.sports_checkboxes if cb.isChecked()
+        ]
+        if not selected_sport_titles:
+            print("Error: No sports selected.")
+            return
+
+        self.selected_sports = [self.sport_mapping[title] for title in selected_sport_titles]
+
+        futures_sports = [sport for sport in self.selected_sports if self.has_outrights[sport]]
+        non_futures_sports = [sport for sport in self.selected_sports if not self.has_outrights[sport]]
+
+        if futures_sports and non_futures_sports:
+            print("Error: Cannot mix futures and non-futures sports.")
+            return
+
+        if futures_sports:
+            self.futures_odds_window = FuturesOddsWindow(
+                futures_sports, self.selected_accounts, self.sportsbook_mapping, self.display_sportsbooks
+            )
+            self.futures_odds_window.show()
+        elif non_futures_sports:
+            self.current_odds_window = CurrentOddsWindow(
+                non_futures_sports, self.selected_accounts, self.sportsbook_mapping, self.display_sportsbooks
+            )
+            self.current_odds_window.show()
+
+            # start background fetch of event ids for the selected sports
+            try:
+                self._event_ids_worker = EventIdsWorker(odds_api, non_futures_sports)
+                self._event_ids_worker.finished.connect(self._on_event_ids_fetched)
+                self._event_ids_worker.start()
+            except Exception as e:
+                print(f"Failed to start event id worker: {e}")
+
+        self.close()
+
+    def go_back(self):
+        self.startup_window = StartupWindow()
+        self.startup_window.show()
+        self.close()
+
+    def _on_event_ids_fetched(self, mapping):
+        try:
+            if hasattr(self, 'current_odds_window') and self.current_odds_window:
+                self.current_odds_window.set_event_ids_map(mapping)
+        except Exception as e:
+            print(f"Error applying fetched event ids: {e}")
 
 
 class CurrentOddsWindow(QMainWindow):
@@ -283,6 +384,10 @@ class CurrentOddsWindow(QMainWindow):
 
         self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
         main_layout.addWidget(self.requests_remaining_label)
+
+        # Event IDs load status
+        self.event_ids_status_label = QLabel("Event IDs: Not loaded", self)
+        main_layout.addWidget(self.event_ids_status_label)
 
         # Sport Selection Dropdown
         self.sport_dropdown = QComboBox(self)
@@ -324,6 +429,69 @@ class CurrentOddsWindow(QMainWindow):
 
         try:
             odds_data = self.fetch_odds_data()
+            # If market is spreads or totals, compute consensus point per event and try
+            # to fetch event-level odds for that exact point to make apples-to-apples comparisons.
+            market_type = self.market_dropdown.currentText()
+            if market_type in ('spreads', 'totals') and isinstance(odds_data, list):
+                event_target_points = {}
+                for event in odds_data:
+                    cp, fav = compute_consensus_point(event, market_type)
+                    if cp is not None:
+                        # store rounded consensus and favorite (if any)
+                        try:
+                            event['_consensus_point'] = cp
+                            if market_type == 'spreads':
+                                # favorite is only meaningful for spreads
+                                event['_consensus_favorite'] = fav
+                        except Exception:
+                            pass
+                        event_target_points[event.get('id')] = cp
+
+                # Check remaining requests and only proceed if we have enough quota
+                try:
+                    remaining = odds_api.get_remaining_requests()
+                except Exception:
+                    remaining = 0
+
+                needed = len(event_target_points)
+                if needed > 0 and remaining >= needed:
+                    for event in odds_data:
+                        eid = event.get('id')
+                        if eid in event_target_points:
+                            target = event_target_points[eid]
+                            try:
+                                ev_odds = odds_api.get_event_odds(
+                                    self.current_sport,
+                                    eid,
+                                    markets='spreads',
+                                    odds_format=ODDS_FORMAT,
+                                    bookmakers=','.join(self.display_sportsbooks)
+                                )
+                                # ev_odds is expected to be a list with single event dict
+                                if isinstance(ev_odds, list) and len(ev_odds) > 0:
+                                    ev = ev_odds[0]
+                                    for b in ev.get('bookmakers', []):
+                                        orig_b = next((ob for ob in event.get('bookmakers', []) if ob.get('key') == b.get('key')), None)
+                                        if not orig_b:
+                                            continue
+                                        ev_market = next((m for m in b.get('markets', []) if m.get('key') == 'spreads'), None)
+                                        if not ev_market:
+                                            continue
+                                            # Filter outcomes to those matching the absolute target point (both sides)
+                                            matched = [o for o in ev_market.get('outcomes', []) if 'point' in o and abs(abs(float(o.get('point', 0))) - abs(target)) < 1e-6]
+                                        if matched:
+                                            # replace original spreads outcomes with the exact-point ones
+                                            orig_market = next((m for m in orig_b.get('markets', []) if m.get('key') == 'spreads'), None)
+                                            if orig_market:
+                                                orig_market['outcomes'] = matched
+                                                # mark that we used an event-level requery for this event's spreads
+                                                try:
+                                                    event['_spread_method'] = 'requery'
+                                                except Exception:
+                                                    pass
+                            except Exception as e:
+                                print(f"Failed to fetch event-level odds for {eid}: {e}")
+
             self.process_odds_data(odds_data)
             self.add_headers()
             for event in odds_data:
@@ -358,7 +526,9 @@ class CurrentOddsWindow(QMainWindow):
                         outcome["no_vig_price"] = odds_converter("probability", ODDS_FORMAT, no_vig_prob)
 
     def add_headers(self):
-        headers = ["Event", "Event Date", "Outcome"] + [
+        # Dynamic label: show 'Point' for totals market, 'Spread' for spreads
+        point_label = "Point" if self.market_dropdown.currentText() == 'totals' else "Spread"
+        headers = ["Event", "Event Date", "Outcome", point_label] + [
             self.sportsbook_mapping[bookmaker]
             for bookmaker in self.display_sportsbooks
         ] + ["Consensus Odds", "Positive Edge", "Kelly Bet", "Best Sportsbook"]
@@ -366,64 +536,164 @@ class CurrentOddsWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(headers)
 
     def populate_table_rows(self, event):
-        for outcome in event['bookmakers'][0]['markets'][0]['outcomes']:
+        market_key = self.market_dropdown.currentText()
+
+        # For spreads, iterate by team names to avoid mismatch due to point formatting differences
+        if market_key == 'spreads':
+            outcome_names = [event.get('home_team'), event.get('away_team')]
+        else:
+            # default behavior: use outcomes from first bookmaker/market
+            first_bm = event['bookmakers'][0]
+            first_market = first_bm['markets'][0]
+            outcome_names = [o['name'] for o in first_market.get('outcomes', [])]
+
+        for idx, outcome_name in enumerate(outcome_names):
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(f"{event['home_team']} vs {event['away_team']}"))
             self.table.setItem(row, 1, QTableWidgetItem(convert_to_eastern(event['commence_time'])))
-            self.table.setItem(row, 2, QTableWidgetItem(outcome['name']))
+            self.table.setItem(row, 2, QTableWidgetItem(outcome_name))
+            # Point/Spread column (compact, per-outcome). Show consensus point when available.
+            spread_display = ""
+            if market_key == 'spreads':
+                cp = event.get('_consensus_point')
+                fav = event.get('_consensus_favorite')
+                if cp is not None:
+                    try:
+                        # For each outcome row, show numeric signed consensus point.
+                        if fav:
+                            if outcome_name == fav:
+                                spread_display = f"-{abs(cp):.1f}"
+                            else:
+                                spread_display = f"+{abs(cp):.1f}"
+                        else:
+                            # pick 0.0 for pick'em
+                            spread_display = f"{0:.1f}"
+                    except Exception:
+                        spread_display = str(cp)
+            elif market_key == 'totals':
+                cp = event.get('_consensus_point')
+                if cp is not None:
+                    try:
+                        name_lower = outcome_name.lower()
+                        if 'over' in name_lower:
+                            suffix = 'o'
+                        elif 'under' in name_lower:
+                            suffix = 'u'
+                        else:
+                            # fallback by position: first -> over, second -> under
+                            suffix = 'o' if idx == 0 else 'u'
+                        if float(cp).is_integer():
+                            pts = f"{int(cp)}"
+                        else:
+                            pts = f"{cp:.1f}"
+                        spread_display = f"{pts}{suffix}"
+                    except Exception:
+                        spread_display = str(cp)
 
             probabilities = []
             weights = []
-            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=3):
-                bookmaker = next((b for b in event['bookmakers'] if b['key'] == bookmaker_key), None)
-                if bookmaker:
-                    market = next((m for m in bookmaker['markets'] if m['key'] == self.market_dropdown.currentText()), None)
-                    if market:
-                        outcome_data = next((o for o in market['outcomes'] if o['name'] == outcome['name']), None)
-                        if outcome_data:
-                            self.table.setItem(row, col, QTableWidgetItem(str(outcome_data["price"])))
-                            probabilities.append(odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"]))
+            method_used = event.get('_spread_method', 'native')
 
-                            # Apply weighting for Pinnacle
-                            weight = 10 if bookmaker_key == "pinnacle" else 1
+            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=4):
+                bookmaker = next((b for b in event.get('bookmakers', []) if b.get('key') == bookmaker_key), None)
+                if bookmaker:
+                    market = next((m for m in bookmaker.get('markets', []) if m.get('key') == market_key), None)
+                    if market:
+                        # Try to match by exact name first
+                        outcome_data = next((o for o in market.get('outcomes', []) if o.get('name') == outcome_name), None)
+
+                        # If not found and this is spreads, try to match by team substring
+                        if outcome_data is None and market_key == 'spreads':
+                            outcome_data = next((o for o in market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
+
+                        # If still not found, as a fallback normalize points to nearest 0.5 and pick closest
+                        if outcome_data is None and market_key == 'spreads':
+                            # attempt to find outcome with nearest point to consensus if available
+                            pts = [o for o in market.get('outcomes', []) if 'point' in o and o.get('point') is not None]
+                            if pts:
+                                # choose one with smallest absolute point difference to 0 (prefer favorites/underdogs by name presence)
+                                outcome_data = pts[0]
+                                method_used = 'normalized'
+
+                        if outcome_data:
+                            price_display = outcome_data.get('price')
+                            self.table.setItem(row, col, QTableWidgetItem(str(price_display)))
+
+                            # populate spread_display from the first matching bookmaker outcome that has a 'point'
+                            if spread_display == "" and market_key == 'spreads' and outcome_data.get('point') is not None:
+                                pt = outcome_data.get('point')
+                                # keep sign if present, else show absolute with + for positive
+                                try:
+                                    spread_display = ("+" + str(pt)) if float(pt) > 0 else str(pt)
+                                except Exception:
+                                    spread_display = str(pt)
+
+                            # Use no_vig_price if precomputed, else compute probability directly
+                            no_vig = outcome_data.get('no_vig_price') if 'no_vig_price' in outcome_data else None
+                            if no_vig is not None:
+                                probabilities.append(odds_converter(ODDS_FORMAT, 'probability', no_vig))
+                            else:
+                                try:
+                                    prob = odds_converter(ODDS_FORMAT, 'probability', outcome_data.get('price'))
+                                    probabilities.append(prob)
+                                except Exception:
+                                    pass
+
+                            weight = 10 if bookmaker_key == 'pinnacle' else 1
                             weights.append(weight)
 
-            if probabilities:
-                consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
-                consensus_odds = odds_converter("probability", ODDS_FORMAT, consensus_probability)
+                # set Spread cell (compact) in column index 3
+                self.table.setItem(row, 3, QTableWidgetItem(spread_display))
 
-                # Correct column alignment
-                consensus_col = len(self.display_sportsbooks) + 3
-                edge_col = len(self.display_sportsbooks) + 4
-                kelly_col = len(self.display_sportsbooks) + 5
-                best_sportsbook_col = len(self.display_sportsbooks) + 6
+                # Correct column alignment (after Event, Event Date, Outcome, Spread, sportsbooks...)
+                consensus_col = len(self.display_sportsbooks) + 4
+                edge_col = consensus_col + 1
+                kelly_col = consensus_col + 2
+                best_sportsbook_col = consensus_col + 3
 
-                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+                consensus_probability = None
+                if probabilities and sum(weights) > 0:
+                    consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
+                    consensus_odds = odds_converter('probability', ODDS_FORMAT, consensus_probability)
+                    self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+                else:
+                    self.table.setItem(row, consensus_col, QTableWidgetItem("N/A"))
 
                 # Calculate Positive Edge and Kelly Bet based on user-selected sportsbooks
                 best_sportsbook = None
                 best_edge = -float('inf')
                 best_kelly = 0
 
-                for account_key in self.selected_accounts:
-                    user_market = next(
-                        (m for b in event['bookmakers'] if b['key'] == account_key for m in b['markets'] if m['key'] == self.market_dropdown.currentText()),
-                        None
-                    )
-                    if user_market:
-                        user_outcome = next((o for o in user_market["outcomes"] if o["name"] == outcome['name']), None)
-                        if user_outcome:
-                            user_probability = odds_converter(ODDS_FORMAT, "probability", user_outcome["price"])
-                            edge = consensus_probability - user_probability
-                            kelly = kelly_criterion(
-                                consensus_probability, odds_converter(ODDS_FORMAT, "decimal", user_outcome["price"])
-                            )
+                if consensus_probability is not None:
+                    for account_key in self.selected_accounts:
+                        user_market = next(
+                            (m for b in event.get('bookmakers', []) if b.get('key') == account_key for m in b.get('markets', []) if m.get('key') == market_key),
+                            None
+                        )
+                        if user_market:
+                            # match user outcome similarly by team
+                            user_outcome = next((o for o in user_market.get('outcomes', []) if o.get('name') == outcome_name), None)
+                            if user_outcome is None and market_key == 'spreads':
+                                user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
+                            if user_outcome:
+                                try:
+                                    user_probability = odds_converter(ODDS_FORMAT, 'probability', user_outcome.get('price'))
+                                    edge = consensus_probability - user_probability
+                                    kelly = kelly_criterion(
+                                        consensus_probability, odds_converter(ODDS_FORMAT, 'decimal', user_outcome.get('price'))
+                                    )
 
-                            if edge > best_edge:
-                                best_edge = edge
-                                best_kelly = kelly
-                                best_sportsbook = account_key
+                                    if edge > best_edge:
+                                        best_edge = edge
+                                        best_kelly = kelly
+                                        best_sportsbook = account_key
+                                except Exception:
+                                    continue
+                else:
+                    best_edge = 0
+                    best_kelly = 0
+                    best_sportsbook = None
 
                 self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
                 self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
@@ -436,6 +706,23 @@ class CurrentOddsWindow(QMainWindow):
         except Exception as e:
             print(f"Error fetching requests remaining: {e}")
             self.requests_remaining_label.setText("Requests Remaining: Error")
+
+    def set_event_ids_map(self, mapping: dict):
+        """Receive pre-fetched event id mapping (or flat list under key '_all')."""
+        try:
+            self.event_ids_map = mapping
+            total = 0
+            if isinstance(mapping, dict):
+                # mapping may be {'_all': [ids]}
+                if '_all' in mapping and isinstance(mapping['_all'], list):
+                    total = len(mapping['_all'])
+                else:
+                    for v in mapping.values():
+                        if isinstance(v, list):
+                            total += len(v)
+            self.event_ids_status_label.setText(f"Event IDs loaded: {total}")
+        except Exception as e:
+            print(f"Error setting event ids map: {e}")
 
     def go_back(self):
         self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
