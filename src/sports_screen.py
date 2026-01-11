@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread
 import sys
 from the_odds_api import OddsAPI
 from config import (
-    PALETTE, THEODDSAPI_KEY_TEST, THEODDSAPI_KEY_PROD, ODDS_FORMAT
+    PALETTE, PALETTES, THEODDSAPI_KEY_TEST, THEODDSAPI_KEY_PROD, ODDS_FORMAT
 )
 from utils import (
     kelly_criterion,
@@ -83,6 +83,19 @@ class StartupWindow(QMainWindow):
         self.historical_analysis_button.clicked.connect(self.open_historical_analysis)
         main_layout.addWidget(self.historical_analysis_button)
 
+        # Theme selector
+        self.theme_dropdown = QComboBox(self)
+        self.theme_dropdown.addItems(['dark', 'light'])
+        try:
+            prefs = load_user_prefs()
+            current_theme = prefs.get('theme', 'dark') if isinstance(prefs, dict) else 'dark'
+            idx = 0 if current_theme == 'dark' else 1
+            self.theme_dropdown.setCurrentIndex(idx)
+        except Exception:
+            pass
+        self.theme_dropdown.currentTextChanged.connect(self.change_theme)
+        main_layout.addWidget(self.theme_dropdown)
+
     def open_user_sportsbook_selection(self):
         self.user_sportsbook_window = UserSportsbookSelectionWindow(self.sportsbook_mapping)
         self.user_sportsbook_window.show()
@@ -147,6 +160,21 @@ class StartupWindow(QMainWindow):
             self.close()
         else:
             print("Quick Start failed: could not determine a default sport.")
+
+    def change_theme(self, theme_name: str):
+        """Apply a new theme and persist the choice."""
+        try:
+            pal = PALETTES.get(theme_name, PALETTE)
+            app = QApplication.instance()
+            if app:
+                app.setStyleSheet(set_stylesheet(pal))
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['theme'] = theme_name
+            save_user_prefs(prefs)
+        except Exception as e:
+            print(f"Failed to change theme: {e}")
 
 
 class UserSportsbookSelectionWindow(QMainWindow):
@@ -1027,7 +1055,11 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     # Initialize GUI formatting
-    stylesheet = set_stylesheet(PALETTE)
+    # Load user theme preference
+    prefs = load_user_prefs()
+    theme = prefs.get('theme', 'dark') if isinstance(prefs, dict) else 'dark'
+    chosen_palette = PALETTES.get(theme, PALETTE)
+    stylesheet = set_stylesheet(chosen_palette)
     app.setStyleSheet(stylesheet)
 
     # Run App

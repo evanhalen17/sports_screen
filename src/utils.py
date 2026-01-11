@@ -177,25 +177,35 @@ def remove_none_values(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
 def set_stylesheet(palette: dict[str: str]) -> str:
+    """Return a modernized stylesheet string based on the provided palette.
+
+    The stylesheet focuses on readable typography, comfortable spacing, and
+    clear contrast for both light and dark palettes.
+    """
     return f"""
+    /* Global font + app background */
     QMainWindow {{
         background-color: {palette['background-dark']};
-        color: {palette['table-row-alt1']};
+        color: {palette['text-light']};
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+        font-size: 13px;
     }}
 
+    /* Table styling */
     QTableWidget {{
         background-color: {palette['table-row-alt1']};
         alternate-background-color: {palette['table-row-alt2']};
-        gridline-color: #444;
+        gridline-color: rgba(0,0,0,0.08);
         color: {palette['text-light']};
-        selection-background-color: {palette['text-light']};
-        selection-color: {palette['text-dark']};
-        border: 1px solid #555;
+        selection-background-color: {palette['table-row-hover']};
+        selection-color: {palette['text-light']};
+        border-radius: 8px;
+        padding: 6px;
     }}
 
     QTableWidget::item {{
-        padding: 5px;
-        border: 0px;
+        padding: 10px;
+        border-bottom: 1px solid rgba(0,0,0,0.06);
     }}
 
     QTableWidget::item:hover {{
@@ -204,49 +214,80 @@ def set_stylesheet(palette: dict[str: str]) -> str:
     }}
 
     QTableWidget::item:selected {{
-        background-color: {palette['text-light']};
-        color: {palette['text-dark']};
+        background-color: {palette['table-row-hover']};
+        color: {palette['text-light']};
     }}
 
+    /* Header */
     QHeaderView::section {{
         background-color: {palette['table-hdr-dark']};
         color: {palette['text-light']};
-        padding: 5px;
-        border: 1px solid #444;
-        font-weight: bold;
+        padding: 8px;
+        border: none;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
     }}
 
+    /* Comboboxes */
     QComboBox {{
-        background-color: {palette['table-hdr-dark']};
+        background-color: transparent;
         color: {palette['text-light']};
-        border: 1px solid #444;
-        padding: 3px;
-        border-radius: 4px;
-        font-size: 14px;
+        border: 1px solid rgba(0,0,0,0.12);
+        padding: 6px 8px;
+        border-radius: 6px;
+        min-height: 28px;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
     }}
 
-    QComboBox:hover {{
-        background-color: {palette['combobox-hover']}
-    }}
-
+    /* Labels */
     QLabel {{
         color: {palette['text-light']};
-        font-size: 20px;
-        font-weight: bold;
     }}
 
+    /* Buttons */
     QPushButton {{
         background-color: {palette['table-hdr-dark']};
         color: {palette['text-light']};
-        border: 1px solid #555;
-        padding: 6px;
-        border-radius: 4px;
-        font-size: 14px;
-        font-weight: bold;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 13px;
     }}
-
     QPushButton:hover {{
         background-color: {palette['combobox-hover']};
+    }}
+
+    /* Small helper text */
+    .smallLabel {{
+        font-size: 11px;
+        color: rgba(255,255,255,0.75);
+    }}
+
+    /* Scrollbar styling */
+    QScrollBar:vertical {{
+        background: transparent;
+        width: 10px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {palette['table-hdr-dark']};
+        border-radius: 5px;
+        min-height: 20px;
+    }}
+
+    /* Inputs */
+    QDoubleSpinBox, QLineEdit {{
+        background-color: rgba(255,255,255,0.02);
+        border: 1px solid rgba(0,0,0,0.08);
+        padding: 6px;
+        border-radius: 6px;
+    }}
+
+    /* Emphasize selection */
+    QTableWidget QTableCornerButton::section {{
+        background: transparent;
     }}
     """
 
