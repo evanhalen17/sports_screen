@@ -73,6 +73,12 @@ class StartupWindow(QMainWindow):
         self.current_odds_button.clicked.connect(self.open_current_odds)
         main_layout.addWidget(self.current_odds_button)
 
+        # Quick Start: jump straight into Current Odds with saved or sensible defaults
+        self.quick_start_button = QPushButton("Quick Start", self)
+        self.quick_start_button.setToolTip("Open Current Odds using saved preferences or popular sportsbooks")
+        self.quick_start_button.clicked.connect(self.quick_start)
+        main_layout.addWidget(self.quick_start_button)
+
         self.historical_analysis_button = QPushButton("Review Historical Betslips", self)
         self.historical_analysis_button.clicked.connect(self.open_historical_analysis)
         main_layout.addWidget(self.historical_analysis_button)
@@ -100,6 +106,47 @@ class StartupWindow(QMainWindow):
         self.historical_analysis_window = HistoricalAnalysisWindow()
         self.historical_analysis_window.show()
         self.close()
+
+    def quick_start(self):
+        """Open CurrentOddsWindow using saved prefs or sensible defaults."""
+        try:
+            prefs = load_user_prefs()
+        except Exception:
+            prefs = {}
+
+        selected_accounts = prefs.get('selected_accounts', {}) if isinstance(prefs, dict) else {}
+        display_sportsbooks = prefs.get('display_sportsbooks', []) if isinstance(prefs, dict) else []
+
+        # sensible defaults if nothing saved
+        if not display_sportsbooks:
+            display_sportsbooks = ['draftkings', 'fanduel', 'betmgm', 'pinnacle', 'betrivers']
+
+        # choose a default sport (first non-futures if possible)
+        try:
+            sports = odds_api.get_sports() or []
+            default_sport = None
+            for s in sports:
+                if not s.get('has_outrights'):
+                    default_sport = s['key']
+                    break
+            if default_sport is None and sports:
+                default_sport = sports[0]['key']
+        except Exception:
+            default_sport = None
+
+        if default_sport:
+            self.current_odds_window = CurrentOddsWindow([default_sport], selected_accounts, self.sportsbook_mapping, display_sportsbooks)
+            self.current_odds_window.show()
+            # persist last chosen sport/market for future quick starts
+            try:
+                prefs['last_sport'] = default_sport
+                prefs['display_sportsbooks'] = display_sportsbooks
+                save_user_prefs(prefs)
+            except Exception:
+                pass
+            self.close()
+        else:
+            print("Quick Start failed: could not determine a default sport.")
 
 
 class UserSportsbookSelectionWindow(QMainWindow):
@@ -166,6 +213,12 @@ class UserSportsbookSelectionWindow(QMainWindow):
         self.select_all_button.clicked.connect(self.select_all)
         main_layout.addWidget(self.select_all_button)
 
+        # Quick preset: select popular sportsbooks
+        self.select_popular_button = QPushButton("Select Popular", self)
+        self.select_popular_button.setToolTip("Check a preset of popular sportsbooks")
+        self.select_popular_button.clicked.connect(self.select_popular)
+        main_layout.addWidget(self.select_popular_button)
+
         self.deselect_all_button = QPushButton("Clear Selections", self)
         self.deselect_all_button.clicked.connect(self.deselect_all)
         main_layout.addWidget(self.deselect_all_button)
@@ -181,6 +234,19 @@ class UserSportsbookSelectionWindow(QMainWindow):
     def deselect_all(self):
         for _, widget in self.sportsbook_widgets.items():
             widget[0].setChecked(False)
+
+    def select_popular(self):
+        """Check a small preset list of popular sportsbooks and assign light default bankrolls."""
+        popular = ['draftkings', 'fanduel', 'betmgm', 'pinnacle', 'betrivers']
+        for key, (checkbox, bankroll_input) in self.sportsbook_widgets.items():
+            if key in popular:
+                checkbox.setChecked(True)
+                # set a small default bankroll if currently zero
+                try:
+                    if bankroll_input.value() == 0:
+                        bankroll_input.setValue(100.0)
+                except Exception:
+                    pass
 
     def save_selections(self):
         self.selected_accounts = {
