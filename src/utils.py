@@ -347,6 +347,44 @@ def get_all_event_ids_flat(
     return flat
 
 
+def _prefs_file_path(custom_path: Optional[str] = None) -> str:
+    """Return the prefs file path, creating `data/` if needed.
+
+    If `custom_path` is provided, it is returned directly.
+    """
+    if custom_path:
+        return custom_path
+    base = os.path.join(os.getcwd(), 'data')
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, 'user_prefs.json')
+
+
+def load_user_prefs(path: Optional[str] = None) -> Dict:
+    """Load user preferences from JSON. Returns empty dict on error."""
+    fp = _prefs_file_path(path)
+    try:
+        if os.path.exists(fp):
+            with open(fp, 'r') as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def save_user_prefs(prefs: Dict, path: Optional[str] = None) -> bool:
+    """Save user preferences to JSON. Returns True on success."""
+    fp = _prefs_file_path(path)
+    try:
+        with open(fp, 'w') as f:
+            json.dump(prefs or {}, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def compute_consensus_point(event: dict, market_type: str = 'spreads', pinnacle_weight: int = 10):
     """
     Compute a consensus point for an event.

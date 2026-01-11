@@ -18,8 +18,11 @@ from utils import (
     set_stylesheet,
     convert_to_eastern,
     get_all_event_ids_flat,
+    fetch_event_ids_for_sports,
+    compute_consensus_point,
+    load_user_prefs,
+    save_user_prefs,
 )
-from utils import fetch_event_ids_for_sports, compute_consensus_point
 from rich import print
 
 
@@ -143,6 +146,22 @@ class UserSportsbookSelectionWindow(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         main_layout.addWidget(self.scroll_area)
 
+        # Load saved user preferences (selected sportsbooks and bankrolls)
+        try:
+            prefs = load_user_prefs()
+            saved_accounts = prefs.get('selected_accounts', {}) if isinstance(prefs, dict) else {}
+            saved_display = prefs.get('display_sportsbooks', []) if isinstance(prefs, dict) else []
+            for key, (checkbox, bankroll_input) in self.sportsbook_widgets.items():
+                if key in saved_display:
+                    checkbox.setChecked(True)
+                if key in saved_accounts:
+                    try:
+                        bankroll_input.setValue(float(saved_accounts.get(key, 0)))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         self.select_all_button = QPushButton("Select All", self)
         self.select_all_button.clicked.connect(self.select_all)
         main_layout.addWidget(self.select_all_button)
@@ -175,6 +194,14 @@ class UserSportsbookSelectionWindow(QMainWindow):
         ]
         print("Saved Accounts:", self.selected_accounts)
         print("Display Sportsbooks:", self.display_sportsbooks)
+        # Persist preferences for next session
+        try:
+            save_user_prefs({
+                'selected_accounts': self.selected_accounts,
+                'display_sportsbooks': self.display_sportsbooks,
+            })
+        except Exception:
+            pass
         self.close()
 
     def get_selections(self):
