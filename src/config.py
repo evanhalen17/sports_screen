@@ -15,7 +15,7 @@ load_dotenv(API_DATA_DIR)
 THEODDSAPI_KEY_TEST = os.getenv('THEODDSAPI_KEY_TEST')
 THEODDSAPI_KEY_PROD = os.getenv('THEODDSAPI_KEY_PROD')
 
-ODDS_FORMAT = 'decimal'
+ODDS_FORMAT = 'american'
 
 PALETTES = {
     'dark': {
