@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QLabel, QScrollArea, QTableWidget, QTableWidgetItem,
     QHeaderView, QHBoxLayout, QCheckBox, QComboBox,
-    QPushButton, QDoubleSpinBox
+    QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QBrush, QFont
@@ -25,6 +25,22 @@ from utils import (
     save_user_prefs,
 )
 from rich import print
+
+
+class EventDetailsDialog(QDialog):
+    def __init__(self, parent=None, content: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Event Details")
+        self.setMinimumSize(600, 400)
+        layout = QVBoxLayout(self)
+        self.editor = QPlainTextEdit(self)
+        self.editor.setReadOnly(True)
+        self.editor.setPlainText(content or "No details available.")
+        layout.addWidget(self.editor)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, self)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
 
 
 class StartupWindow(QMainWindow):
@@ -552,6 +568,12 @@ class CurrentOddsWindow(QMainWindow):
             self.frozen_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
             self.table.selectionModel().selectionChanged.connect(self._on_main_selection_changed)
             self.frozen_table.selectionModel().selectionChanged.connect(self._on_frozen_selection_changed)
+            # Wire double-click to open event details
+            try:
+                self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
+                self.frozen_table.cellDoubleClicked.connect(self._on_frozen_double_clicked)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -592,9 +614,14 @@ class CurrentOddsWindow(QMainWindow):
     def update_table(self):
         self.table.clear()
         self.table.setRowCount(0)
+        # clear cached row->event mapping
+        self._row_event_map = []
+        self._last_odds_data = None
 
         try:
             odds_data = self.fetch_odds_data()
+            # cache fetched data for detail views
+            self._last_odds_data = odds_data
             # If market is spreads or totals, compute consensus point per event and try
             # to fetch event-level odds for that exact point to make apples-to-apples comparisons.
             market_type = self.market_dropdown.currentText()
@@ -769,6 +796,30 @@ class CurrentOddsWindow(QMainWindow):
                 self.table.hideColumn(i)
         except Exception:
             pass
+        # Improve header alignment and add helpful tooltips
+        try:
+            header = self.table.horizontalHeader()
+            header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Tooltip for Requery column (frozen table will show it)
+            try:
+                if self.frozen_table.horizontalHeaderItem(1):
+                    self.frozen_table.horizontalHeaderItem(1).setToolTip("⟳ = event-level requery was used to fetch exact-point odds for apples-to-apples comparison")
+            except Exception:
+                pass
+            # Tooltip and emphasis for Consensus Odds column in the right table
+            consensus_col_idx = len(self.display_sportsbooks) + 5
+            if consensus_col_idx < self.table.columnCount() and self.table.horizontalHeaderItem(consensus_col_idx):
+                self.table.horizontalHeaderItem(consensus_col_idx).setToolTip("Consensus Odds: Pinnacle-weighted consensus across selected sportsbooks (no-vig normalized)")
+                try:
+                    hdr_item = self.table.horizontalHeaderItem(consensus_col_idx)
+                    hdr_font = hdr_item.font()
+                    hdr_font.setBold(True)
+                    hdr_item.setFont(hdr_font)
+                    hdr_item.setBackground(QBrush(QColor('#f0f0f0')))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _on_requery_toggled(self, enabled: bool):
         try:
@@ -811,37 +862,7 @@ class CurrentOddsWindow(QMainWindow):
             pass
         finally:
             self._syncing_selection = False
-        # Ensure frozen table shows matching headers (copy first five header labels)
-        try:
-            left_headers = headers[:5]
-            self.frozen_table.setColumnCount(len(left_headers))
-            self.frozen_table.setHorizontalHeaderLabels(left_headers)
-        except Exception:
-            pass
-            # Improve header alignment and add helpful tooltips
-        try:
-            header = self.table.horizontalHeader()
-            header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-            # Tooltip for Requery column
-            if self.table.horizontalHeaderItem(1):
-                self.table.horizontalHeaderItem(1).setToolTip("⟳ = event-level requery was used to fetch exact-point odds for apples-to-apples comparison")
-            # Tooltip for Consensus Odds column
-            consensus_col_idx = len(self.display_sportsbooks) + 5
-            if consensus_col_idx < self.table.columnCount() and self.table.horizontalHeaderItem(consensus_col_idx):
-                self.table.horizontalHeaderItem(consensus_col_idx).setToolTip("Consensus Odds: Pinnacle-weighted consensus across selected sportsbooks (no-vig normalized)")
-                # Make Consensus header more prominent and improve contrast
-                try:
-                    if consensus_col_idx < self.table.columnCount():
-                        hdr_item = self.table.horizontalHeaderItem(consensus_col_idx)
-                        if hdr_item:
-                            hdr_font = hdr_item.font()
-                            hdr_font.setBold(True)
-                            hdr_item.setFont(hdr_font)
-                            hdr_item.setBackground(QBrush(QColor('#f0f0f0')))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # (Header synchronization handled in add_headers)
 
     def populate_table_rows(self, event):
         market_key = self.market_dropdown.currentText()
@@ -858,6 +879,13 @@ class CurrentOddsWindow(QMainWindow):
         for idx, outcome_name in enumerate(outcome_names):
             row = self.table.rowCount()
             self.table.insertRow(row)
+            try:
+                # map this table row back to the source event id for detail views
+                if not hasattr(self, '_row_event_map') or self._row_event_map is None:
+                    self._row_event_map = []
+                self._row_event_map.append(event.get('id'))
+            except Exception:
+                pass
             # Event column
             self.table.setItem(row, 0, QTableWidgetItem(f"{event['home_team']} vs {event['away_team']}"))
             # Requery indicator (will be filled later if requery used)
@@ -956,61 +984,61 @@ class CurrentOddsWindow(QMainWindow):
                             weight = 10 if bookmaker_key == 'pinnacle' else 1
                             weights.append(weight)
 
-                # set Spread cell (compact) in column index 4 (Event, Requery, Event Date, Outcome, Spread)
-                self.table.setItem(row, 4, QTableWidgetItem(spread_display))
+            # set Spread cell (compact) in column index 4 (Event, Requery, Event Date, Outcome, Spread)
+            self.table.setItem(row, 4, QTableWidgetItem(spread_display))
 
-                # Correct column alignment (after Event, Requery, Event Date, Outcome, Spread, sportsbooks...)
-                consensus_col = len(self.display_sportsbooks) + 5
-                edge_col = consensus_col + 1
-                kelly_col = consensus_col + 2
-                best_sportsbook_col = consensus_col + 3
+            # Correct column alignment (after Event, Requery, Event Date, Outcome, Spread, sportsbooks...)
+            consensus_col = len(self.display_sportsbooks) + 5
+            edge_col = consensus_col + 1
+            kelly_col = consensus_col + 2
+            best_sportsbook_col = consensus_col + 3
 
-                consensus_probability = None
-                if probabilities and sum(weights) > 0:
-                    consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
-                    consensus_odds = odds_converter('probability', ODDS_FORMAT, consensus_probability)
-                    self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
-                else:
-                    self.table.setItem(row, consensus_col, QTableWidgetItem("N/A"))
+            consensus_probability = None
+            if probabilities and sum(weights) > 0:
+                consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
+                consensus_odds = odds_converter('probability', ODDS_FORMAT, consensus_probability)
+                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+            else:
+                self.table.setItem(row, consensus_col, QTableWidgetItem("N/A"))
 
-                # Calculate Positive Edge and Kelly Bet based on user-selected sportsbooks
-                best_sportsbook = None
-                best_edge = -float('inf')
+            # Calculate Positive Edge and Kelly Bet based on user-selected sportsbooks
+            best_sportsbook = None
+            best_edge = -float('inf')
+            best_kelly = 0
+
+            if consensus_probability is not None:
+                for account_key in self.selected_accounts:
+                    user_market = next(
+                        (m for b in event.get('bookmakers', []) if b.get('key') == account_key for m in b.get('markets', []) if m.get('key') == market_key),
+                        None
+                    )
+                    if user_market:
+                        # match user outcome similarly by team
+                        user_outcome = next((o for o in user_market.get('outcomes', []) if o.get('name') == outcome_name), None)
+                        if user_outcome is None and market_key == 'spreads':
+                            user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
+                        if user_outcome:
+                            try:
+                                user_probability = odds_converter(ODDS_FORMAT, 'probability', user_outcome.get('price'))
+                                edge = consensus_probability - user_probability
+                                kelly = kelly_criterion(
+                                    consensus_probability, odds_converter(ODDS_FORMAT, 'decimal', user_outcome.get('price'))
+                                )
+
+                                if edge > best_edge:
+                                    best_edge = edge
+                                    best_kelly = kelly
+                                    best_sportsbook = account_key
+                            except Exception:
+                                continue
+            else:
+                best_edge = 0
                 best_kelly = 0
+                best_sportsbook = None
 
-                if consensus_probability is not None:
-                    for account_key in self.selected_accounts:
-                        user_market = next(
-                            (m for b in event.get('bookmakers', []) if b.get('key') == account_key for m in b.get('markets', []) if m.get('key') == market_key),
-                            None
-                        )
-                        if user_market:
-                            # match user outcome similarly by team
-                            user_outcome = next((o for o in user_market.get('outcomes', []) if o.get('name') == outcome_name), None)
-                            if user_outcome is None and market_key == 'spreads':
-                                user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
-                            if user_outcome:
-                                try:
-                                    user_probability = odds_converter(ODDS_FORMAT, 'probability', user_outcome.get('price'))
-                                    edge = consensus_probability - user_probability
-                                    kelly = kelly_criterion(
-                                        consensus_probability, odds_converter(ODDS_FORMAT, 'decimal', user_outcome.get('price'))
-                                    )
-
-                                    if edge > best_edge:
-                                        best_edge = edge
-                                        best_kelly = kelly
-                                        best_sportsbook = account_key
-                                except Exception:
-                                    continue
-                else:
-                    best_edge = 0
-                    best_kelly = 0
-                    best_sportsbook = None
-
-                self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
-                self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
-                self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
+            self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
+            self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
+            self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
             # If we marked that this event used an event-level requery for spreads, show an indicator
             try:
                 method_used = event.get('_spread_method', 'native')
@@ -1027,6 +1055,56 @@ class CurrentOddsWindow(QMainWindow):
                     self.table.setItem(row, 1, rq_item)
             except Exception:
                 pass
+
+    def _on_table_double_clicked(self, row, column):
+        try:
+            self._open_event_details(row)
+        except Exception:
+            pass
+
+    def _on_frozen_double_clicked(self, row, column):
+        try:
+            self._open_event_details(row)
+        except Exception:
+            pass
+
+    def _open_event_details(self, row_index: int):
+        """Open a dialog showing full event-level bookmakers/markets for the selected row's event."""
+        try:
+            if not hasattr(self, '_row_event_map') or self._row_event_map is None:
+                return
+            if row_index < 0 or row_index >= len(self._row_event_map):
+                return
+            event_id = self._row_event_map[row_index]
+            if not event_id or not self._last_odds_data:
+                return
+            event = next((e for e in self._last_odds_data if e.get('id') == event_id), None)
+            if not event:
+                dlg = EventDetailsDialog(self, "No details available for this event.")
+                dlg.exec()
+                return
+
+            # Build a readable text summary of the event odds
+            lines = []
+            lines.append(f"Event: {event.get('home_team')} vs {event.get('away_team')}")
+            lines.append(f"Commence: {convert_to_eastern(event.get('commence_time'))}")
+            lines.append("")
+            for bm in event.get('bookmakers', []):
+                lines.append(f"Bookmaker: {bm.get('title') or bm.get('key')}")
+                for m in bm.get('markets', []):
+                    lines.append(f"  Market: {m.get('key')}")
+                    for o in m.get('outcomes', []):
+                        pt = o.get('point') if 'point' in o else ''
+                        price = o.get('price')
+                        nv = o.get('no_vig_price', '')
+                        lines.append(f"    {o.get('name')} {pt} -> price: {price} no-vig: {nv}")
+                lines.append("")
+
+            content = "\n".join(lines)
+            dlg = EventDetailsDialog(self, content)
+            dlg.exec()
+        except Exception:
+            pass
     def update_requests_remaining(self):
         try:
             requests_remaining = odds_api.get_remaining_requests()
@@ -1169,7 +1247,12 @@ class FuturesOddsWindow(QMainWindow):
                         outcome_data = next((o for o in market['outcomes'] if o['name'] == outcome['name']), None)
                         if outcome_data:
                             self.table.setItem(row, col, QTableWidgetItem(str(outcome_data["price"])))
-                            probabilities.append(odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"]))
+                            try:
+                                probabilities.append(
+                                    odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"])
+                                )
+                            except Exception:
+                                pass
 
                             # Apply weighting for Pinnacle
                             weight = 10 if bookmaker_key == "pinnacle" else 1
