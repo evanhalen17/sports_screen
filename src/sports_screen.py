@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QDoubleSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtGui import QColor, QBrush, QFont
 import sys
 from the_odds_api import OddsAPI
 from config import (
@@ -525,8 +526,51 @@ class CurrentOddsWindow(QMainWindow):
 
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
-        main_layout.addWidget(self.table)
+
+        # Create a frozen table for the left-side columns (Event, Requery, Event Date, Outcome, Spread/Point)
+        self.frozen_table = QTableWidget()
+        self.frozen_table.setColumnCount(5)
+        self.frozen_table.setHorizontalHeaderLabels(["Event", "Requery", "Event Date", "Outcome", "Spread"])
+        self.frozen_table.setAlternatingRowColors(True)
+        self.frozen_table.verticalHeader().setVisible(False)
+
+        # Place frozen_table and main table side-by-side so frozen columns remain visible
+        tables_layout = QHBoxLayout()
+        tables_layout.addWidget(self.frozen_table)
+        tables_layout.addWidget(self.table)
+        main_layout.addLayout(tables_layout)
+
         self.update_table()
+
+        # Selection sync guard
+        self._syncing_selection = False
+        # Enable row selection behavior and connect selection handlers
+        try:
+            self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            self.frozen_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self.frozen_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            self.table.selectionModel().selectionChanged.connect(self._on_main_selection_changed)
+            self.frozen_table.selectionModel().selectionChanged.connect(self._on_frozen_selection_changed)
+        except Exception:
+            pass
+
+        # Requery toggle (persisted)
+        try:
+            prefs = load_user_prefs()
+        except Exception:
+            prefs = {}
+        requery_default = prefs.get('enable_requery', True) if isinstance(prefs, dict) else True
+        self.requery_checkbox = QCheckBox("Enable precise requery (uses API quota)", self)
+        self.requery_checkbox.setChecked(bool(requery_default))
+        self.requery_checkbox.setToolTip("When enabled, the app will re-query event-level odds for the consensus point (may consume API requests). Toggle to conserve quota.")
+        self.requery_checkbox.toggled.connect(self._on_requery_toggled)
+        main_layout.addWidget(self.requery_checkbox)
+
+        # Legend explaining icons and consensus
+        self.legend_label = QLabel("Legend: ⟳ = event-level requery used; Consensus = weighted odds (Pinnacle-weighted).", self)
+        self.legend_label.setStyleSheet("font-size:11px;color:gray;")
+        main_layout.addWidget(self.legend_label)
 
         button_layout = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh", self)
@@ -576,7 +620,14 @@ class CurrentOddsWindow(QMainWindow):
                     remaining = 0
 
                 needed = len(event_target_points)
-                if needed > 0 and remaining >= needed:
+                # Respect user preference for requery
+                try:
+                    prefs = load_user_prefs()
+                    enable_requery = prefs.get('enable_requery', True) if isinstance(prefs, dict) else True
+                except Exception:
+                    enable_requery = True
+
+                if enable_requery and needed > 0 and remaining >= needed:
                     for event in odds_data:
                         eid = event.get('id')
                         if eid in event_target_points:
@@ -621,6 +672,61 @@ class CurrentOddsWindow(QMainWindow):
             self.update_requests_remaining()
             self.table.resizeColumnsToContents()
 
+            # UX polish: fix the first two columns (Event and Requery) to stable widths
+            try:
+                # Fix frozen table column widths so left-side info remains stable
+                fheader = self.frozen_table.horizontalHeader()
+                for ci in range(self.frozen_table.columnCount()):
+                    fheader.setSectionResizeMode(ci, QHeaderView.Fixed)
+                # reasonable widths
+                # Event title
+                try:
+                    self.frozen_table.setColumnWidth(0, 300)
+                    # Requery icon
+                    self.frozen_table.setColumnWidth(1, 40)
+                    # Event Date
+                    self.frozen_table.setColumnWidth(2, 140)
+                    # Outcome
+                    self.frozen_table.setColumnWidth(3, 140)
+                    # Spread/Point
+                    self.frozen_table.setColumnWidth(4, 60)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # Copy first five columns into frozen_table and sync scrolling
+            try:
+                rows = self.table.rowCount()
+                self.frozen_table.setRowCount(rows)
+                for r in range(rows):
+                    for c in range(5):
+                        src_item = self.table.item(r, c)
+                        if src_item:
+                            new_item = QTableWidgetItem(src_item.text())
+                            new_item.setTextAlignment(src_item.textAlignment())
+                            try:
+                                new_item.setForeground(src_item.foreground())
+                            except Exception:
+                                pass
+                            try:
+                                new_item.setFont(src_item.font())
+                            except Exception:
+                                pass
+                            self.frozen_table.setItem(r, c, new_item)
+                        else:
+                            self.frozen_table.setItem(r, c, QTableWidgetItem(""))
+                    try:
+                        self.frozen_table.setRowHeight(r, self.table.rowHeight(r))
+                    except Exception:
+                        pass
+
+                # Sync vertical scrolling
+                self.table.verticalScrollBar().valueChanged.connect(self.frozen_table.verticalScrollBar().setValue)
+                self.frozen_table.verticalScrollBar().valueChanged.connect(self.table.verticalScrollBar().setValue)
+            except Exception:
+                pass
+
         except Exception as e:
             print(f"Error updating table: {e}")
 
@@ -650,12 +756,92 @@ class CurrentOddsWindow(QMainWindow):
     def add_headers(self):
         # Dynamic label: show 'Point' for totals market, 'Spread' for spreads
         point_label = "Point" if self.market_dropdown.currentText() == 'totals' else "Spread"
-        headers = ["Event", "Event Date", "Outcome", point_label] + [
+        # Insert a small 'Requery' indicator column after Event to show event-level requery usage
+        headers = ["Event", "Requery", "Event Date", "Outcome", point_label] + [
             self.sportsbook_mapping[bookmaker]
             for bookmaker in self.display_sportsbooks
         ] + ["Consensus Odds", "Positive Edge", "Kelly Bet", "Best Sportsbook"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
+        # Hide the first five columns in the main table (they are shown in frozen_table)
+        try:
+            for i in range(5):
+                self.table.hideColumn(i)
+        except Exception:
+            pass
+
+    def _on_requery_toggled(self, enabled: bool):
+        try:
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['enable_requery'] = bool(enabled)
+            save_user_prefs(prefs)
+        except Exception:
+            pass
+
+    def _on_main_selection_changed(self, selected, deselected):
+        if self._syncing_selection:
+            return
+        try:
+            self._syncing_selection = True
+            sels = self.table.selectionModel().selectedRows()
+            if sels:
+                r = sels[0].row()
+                self.frozen_table.selectRow(r)
+            else:
+                self.frozen_table.clearSelection()
+        except Exception:
+            pass
+        finally:
+            self._syncing_selection = False
+
+    def _on_frozen_selection_changed(self, selected, deselected):
+        if self._syncing_selection:
+            return
+        try:
+            self._syncing_selection = True
+            sels = self.frozen_table.selectionModel().selectedRows()
+            if sels:
+                r = sels[0].row()
+                self.table.selectRow(r)
+            else:
+                self.table.clearSelection()
+        except Exception:
+            pass
+        finally:
+            self._syncing_selection = False
+        # Ensure frozen table shows matching headers (copy first five header labels)
+        try:
+            left_headers = headers[:5]
+            self.frozen_table.setColumnCount(len(left_headers))
+            self.frozen_table.setHorizontalHeaderLabels(left_headers)
+        except Exception:
+            pass
+            # Improve header alignment and add helpful tooltips
+        try:
+            header = self.table.horizontalHeader()
+            header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Tooltip for Requery column
+            if self.table.horizontalHeaderItem(1):
+                self.table.horizontalHeaderItem(1).setToolTip("⟳ = event-level requery was used to fetch exact-point odds for apples-to-apples comparison")
+            # Tooltip for Consensus Odds column
+            consensus_col_idx = len(self.display_sportsbooks) + 5
+            if consensus_col_idx < self.table.columnCount() and self.table.horizontalHeaderItem(consensus_col_idx):
+                self.table.horizontalHeaderItem(consensus_col_idx).setToolTip("Consensus Odds: Pinnacle-weighted consensus across selected sportsbooks (no-vig normalized)")
+                # Make Consensus header more prominent and improve contrast
+                try:
+                    if consensus_col_idx < self.table.columnCount():
+                        hdr_item = self.table.horizontalHeaderItem(consensus_col_idx)
+                        if hdr_item:
+                            hdr_font = hdr_item.font()
+                            hdr_font.setBold(True)
+                            hdr_item.setFont(hdr_font)
+                            hdr_item.setBackground(QBrush(QColor('#f0f0f0')))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def populate_table_rows(self, event):
         market_key = self.market_dropdown.currentText()
@@ -672,9 +858,14 @@ class CurrentOddsWindow(QMainWindow):
         for idx, outcome_name in enumerate(outcome_names):
             row = self.table.rowCount()
             self.table.insertRow(row)
+            # Event column
             self.table.setItem(row, 0, QTableWidgetItem(f"{event['home_team']} vs {event['away_team']}"))
-            self.table.setItem(row, 1, QTableWidgetItem(convert_to_eastern(event['commence_time'])))
-            self.table.setItem(row, 2, QTableWidgetItem(outcome_name))
+            # Requery indicator (will be filled later if requery used)
+            self.table.setItem(row, 1, QTableWidgetItem(""))
+            # Event Date
+            self.table.setItem(row, 2, QTableWidgetItem(convert_to_eastern(event['commence_time'])))
+            # Outcome
+            self.table.setItem(row, 3, QTableWidgetItem(outcome_name))
             # Point/Spread column (compact, per-outcome). Show consensus point when available.
             spread_display = ""
             if market_key == 'spreads':
@@ -717,7 +908,7 @@ class CurrentOddsWindow(QMainWindow):
             weights = []
             method_used = event.get('_spread_method', 'native')
 
-            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=4):
+            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=5):
                 bookmaker = next((b for b in event.get('bookmakers', []) if b.get('key') == bookmaker_key), None)
                 if bookmaker:
                     market = next((m for m in bookmaker.get('markets', []) if m.get('key') == market_key), None)
@@ -765,11 +956,11 @@ class CurrentOddsWindow(QMainWindow):
                             weight = 10 if bookmaker_key == 'pinnacle' else 1
                             weights.append(weight)
 
-                # set Spread cell (compact) in column index 3
-                self.table.setItem(row, 3, QTableWidgetItem(spread_display))
+                # set Spread cell (compact) in column index 4 (Event, Requery, Event Date, Outcome, Spread)
+                self.table.setItem(row, 4, QTableWidgetItem(spread_display))
 
-                # Correct column alignment (after Event, Event Date, Outcome, Spread, sportsbooks...)
-                consensus_col = len(self.display_sportsbooks) + 4
+                # Correct column alignment (after Event, Requery, Event Date, Outcome, Spread, sportsbooks...)
+                consensus_col = len(self.display_sportsbooks) + 5
                 edge_col = consensus_col + 1
                 kelly_col = consensus_col + 2
                 best_sportsbook_col = consensus_col + 3
@@ -820,7 +1011,22 @@ class CurrentOddsWindow(QMainWindow):
                 self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
                 self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
                 self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
-
+            # If we marked that this event used an event-level requery for spreads, show an indicator
+            try:
+                method_used = event.get('_spread_method', 'native')
+                if method_used == 'requery':
+                    # Put a small icon/text in the Requery column for each outcome row belonging to this event
+                    # The Requery column index is 1; style it for visibility
+                    rq_item = QTableWidgetItem('⟳')
+                    rq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    rq_brush = QBrush(QColor('#1e90ff'))
+                    rq_item.setForeground(rq_brush)
+                    rq_font = rq_item.font()
+                    rq_font.setBold(True)
+                    rq_item.setFont(rq_font)
+                    self.table.setItem(row, 1, rq_item)
+            except Exception:
+                pass
     def update_requests_remaining(self):
         try:
             requests_remaining = odds_api.get_remaining_requests()
