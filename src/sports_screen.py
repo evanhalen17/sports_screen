@@ -4,10 +4,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QLabel, QScrollArea, QTableWidget, QTableWidgetItem,
     QHeaderView, QHBoxLayout, QCheckBox, QComboBox,
-    QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox
+    QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox,
+    QLineEdit, QButtonGroup
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QColor, QBrush, QFont
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize
+from PyQt6.QtGui import QColor, QBrush, QFont, QFontMetrics
 import sys
 from the_odds_api import OddsAPI
 from config import (
@@ -155,10 +156,19 @@ class StartupWindow(QMainWindow):
         try:
             sports = odds_api.get_sports() or []
             default_sport = None
-            for s in sports:
-                if not s.get('has_outrights'):
-                    default_sport = s['key']
-                    break
+            last_sport = prefs.get('last_sport') if isinstance(prefs, dict) else None
+            if last_sport:
+                last_match = next(
+                    (s for s in sports if s.get('key') == last_sport and not s.get('has_outrights')),
+                    None
+                )
+                if last_match:
+                    default_sport = last_match['key']
+            if default_sport is None:
+                for s in sports:
+                    if not s.get('has_outrights'):
+                        default_sport = s['key']
+                        break
             if default_sport is None and sports:
                 default_sport = sports[0]['key']
         except Exception:
@@ -169,6 +179,8 @@ class StartupWindow(QMainWindow):
             self.current_odds_window.show()
             # persist last chosen sport/market for future quick starts
             try:
+                if not isinstance(prefs, dict):
+                    prefs = {}
                 prefs['last_sport'] = default_sport
                 prefs['display_sportsbooks'] = display_sportsbooks
                 save_user_prefs(prefs)
@@ -307,10 +319,12 @@ class UserSportsbookSelectionWindow(QMainWindow):
         print("Display Sportsbooks:", self.display_sportsbooks)
         # Persist preferences for next session
         try:
-            save_user_prefs({
-                'selected_accounts': self.selected_accounts,
-                'display_sportsbooks': self.display_sportsbooks,
-            })
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['selected_accounts'] = self.selected_accounts
+            prefs['display_sportsbooks'] = self.display_sportsbooks
+            save_user_prefs(prefs)
         except Exception:
             pass
         self.close()
@@ -400,6 +414,14 @@ class SportSelectionWindow(QMainWindow):
                 non_futures_sports, self.selected_accounts, self.sportsbook_mapping, self.display_sportsbooks
             )
             self.current_odds_window.show()
+            try:
+                prefs = load_user_prefs()
+                if not isinstance(prefs, dict):
+                    prefs = {}
+                prefs['last_sport'] = non_futures_sports[0]
+                save_user_prefs(prefs)
+            except Exception:
+                pass
 
             # start background fetch of event ids for the selected sports
             try:
@@ -521,34 +543,86 @@ class CurrentOddsWindow(QMainWindow):
         main_layout = QVBoxLayout(self.central_widget)
         self.central_widget.setLayout(main_layout)
 
-        self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
-        main_layout.addWidget(self.requests_remaining_label)
-
-        # Event IDs load status
-        self.event_ids_status_label = QLabel("Event IDs: Not loaded", self)
-        main_layout.addWidget(self.event_ids_status_label)
+        # Top selector bar (odds-first, compact)
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(8)
 
         # Sport Selection Dropdown
         self.sport_dropdown = QComboBox(self)
         self.sport_dropdown.addItems(self.selected_sports)
         self.sport_dropdown.currentTextChanged.connect(self.update_sport)
-        main_layout.addWidget(self.sport_dropdown)
+        top_bar.addWidget(self.sport_dropdown)
 
         # Market Selection Dropdown
         self.market_dropdown = QComboBox(self)
         self.market_dropdown.addItems(["h2h", "spreads", "totals"])
         self.market_dropdown.currentTextChanged.connect(self.update_table)
-        main_layout.addWidget(self.market_dropdown)
+        top_bar.addWidget(self.market_dropdown)
+
+        # Period Selection Dropdown (placeholder for future wiring)
+        self.period_dropdown = QComboBox(self)
+        self.period_dropdown.addItems(["Full Game"])
+        top_bar.addWidget(self.period_dropdown)
+
+        # Pre-Game / Live toggle (UI only for now)
+        self.pregame_button = QPushButton("Pre-Game", self)
+        self.pregame_button.setCheckable(True)
+        self.live_button = QPushButton("Live", self)
+        self.live_button.setCheckable(True)
+        self.pregame_button.setChecked(True)
+        self.live_toggle_group = QButtonGroup(self)
+        self.live_toggle_group.setExclusive(True)
+        self.live_toggle_group.addButton(self.pregame_button)
+        self.live_toggle_group.addButton(self.live_button)
+        top_bar.addWidget(self.pregame_button)
+        top_bar.addWidget(self.live_button)
+
+        top_bar.addStretch(1)
+
+        # Search box (filters will be wired later)
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Search teams...")
+        try:
+            self.search_input.setClearButtonEnabled(True)
+        except Exception:
+            pass
+        self.search_input.setMinimumWidth(200)
+        top_bar.addWidget(self.search_input)
+
+        # Odds format selector (UI only for now)
+        self.odds_format_dropdown = QComboBox(self)
+        self.odds_format_dropdown.addItems(["American", "Decimal", "Probability"])
+        top_bar.addWidget(self.odds_format_dropdown)
+
+        # Refresh button (moved to top bar)
+        self.refresh_button = QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.update_table)
+        top_bar.addWidget(self.refresh_button)
+
+        main_layout.addLayout(top_bar)
+
+        # Status row (compact)
+        status_row = QHBoxLayout()
+        self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
+        status_row.addWidget(self.requests_remaining_label)
+
+        # Event IDs load status
+        self.event_ids_status_label = QLabel("Event IDs: Not loaded", self)
+        status_row.addWidget(self.event_ids_status_label)
+        status_row.addStretch(1)
+        main_layout.addLayout(status_row)
 
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
 
-        # Create a frozen table for the left-side columns (Event, Requery, Event Date, Outcome, Spread/Point)
+        # Create a frozen table for the left-side columns (Event, Requery, Event Date, Outcome, Spread/Point, Hold)
         self.frozen_table = QTableWidget()
-        self.frozen_table.setColumnCount(5)
-        self.frozen_table.setHorizontalHeaderLabels(["Event", "Requery", "Event Date", "Outcome", "Spread"])
+        self.frozen_table.setColumnCount(6)
+        self.frozen_table.setHorizontalHeaderLabels(["Event", "Requery", "Event Date", "Outcome", "Spread", "Hold"])
         self.frozen_table.setAlternatingRowColors(True)
         self.frozen_table.verticalHeader().setVisible(False)
+        self.frozen_table.setWordWrap(True)
 
         # Place frozen_table and main table side-by-side so frozen columns remain visible
         tables_layout = QHBoxLayout()
@@ -595,10 +669,6 @@ class CurrentOddsWindow(QMainWindow):
         main_layout.addWidget(self.legend_label)
 
         button_layout = QHBoxLayout()
-        self.refresh_button = QPushButton("Refresh", self)
-        self.refresh_button.clicked.connect(self.update_table)
-        button_layout.addWidget(self.refresh_button)
-
         self.back_button = QPushButton("Back to Sport Selection", self)
         self.back_button.clicked.connect(self.go_back)
         button_layout.addWidget(self.back_button)
@@ -609,6 +679,14 @@ class CurrentOddsWindow(QMainWindow):
 
     def update_sport(self, sport):
         self.current_sport = sport
+        try:
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['last_sport'] = sport
+            save_user_prefs(prefs)
+        except Exception:
+            pass
         self.update_table()
 
     def update_table(self):
@@ -698,6 +776,7 @@ class CurrentOddsWindow(QMainWindow):
                 self.populate_table_rows(event)
             self.update_requests_remaining()
             self.table.resizeColumnsToContents()
+            self._apply_row_heights()
 
             # UX polish: fix the first two columns (Event and Requery) to stable widths
             try:
@@ -717,17 +796,19 @@ class CurrentOddsWindow(QMainWindow):
                     self.frozen_table.setColumnWidth(3, 140)
                     # Spread/Point
                     self.frozen_table.setColumnWidth(4, 60)
+                    # Hold
+                    self.frozen_table.setColumnWidth(5, 70)
                 except Exception:
                     pass
             except Exception:
                 pass
 
-            # Copy first five columns into frozen_table and sync scrolling
+            # Copy left-side columns into frozen_table and sync scrolling
             try:
                 rows = self.table.rowCount()
                 self.frozen_table.setRowCount(rows)
                 for r in range(rows):
-                    for c in range(5):
+                    for c in range(6):
                         src_item = self.table.item(r, c)
                         if src_item:
                             new_item = QTableWidgetItem(src_item.text())
@@ -753,6 +834,7 @@ class CurrentOddsWindow(QMainWindow):
                 self.frozen_table.verticalScrollBar().valueChanged.connect(self.table.verticalScrollBar().setValue)
             except Exception:
                 pass
+            self._apply_row_heights()
 
         except Exception as e:
             print(f"Error updating table: {e}")
@@ -784,16 +866,22 @@ class CurrentOddsWindow(QMainWindow):
         # Dynamic label: show 'Point' for totals market, 'Spread' for spreads
         point_label = "Point" if self.market_dropdown.currentText() == 'totals' else "Spread"
         # Insert a small 'Requery' indicator column after Event to show event-level requery usage
-        headers = ["Event", "Requery", "Event Date", "Outcome", point_label] + [
+        headers = ["Event", "Requery", "Event Date", "Outcome", point_label, "Hold", "Best Sportsbook", "Positive Edge", "Kelly Bet"] + [
             self.sportsbook_mapping[bookmaker]
             for bookmaker in self.display_sportsbooks
-        ] + ["Consensus Odds", "Positive Edge", "Kelly Bet", "Best Sportsbook"]
+        ] + ["Consensus Odds"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
-        # Hide the first five columns in the main table (they are shown in frozen_table)
+        # Hide the left-side columns in the main table (they are shown in frozen_table)
         try:
-            for i in range(5):
+            for i in range(6):
                 self.table.hideColumn(i)
+        except Exception:
+            pass
+        # Keep frozen table headers in sync (Point/Spread label)
+        try:
+            if self.frozen_table.horizontalHeaderItem(4):
+                self.frozen_table.horizontalHeaderItem(4).setText(point_label)
         except Exception:
             pass
         # Improve header alignment and add helpful tooltips
@@ -807,7 +895,7 @@ class CurrentOddsWindow(QMainWindow):
             except Exception:
                 pass
             # Tooltip and emphasis for Consensus Odds column in the right table
-            consensus_col_idx = len(self.display_sportsbooks) + 5
+            consensus_col_idx = len(self.display_sportsbooks) + 9
             if consensus_col_idx < self.table.columnCount() and self.table.horizontalHeaderItem(consensus_col_idx):
                 self.table.horizontalHeaderItem(consensus_col_idx).setToolTip("Consensus Odds: Pinnacle-weighted consensus across selected sportsbooks (no-vig normalized)")
                 try:
@@ -864,6 +952,40 @@ class CurrentOddsWindow(QMainWindow):
             self._syncing_selection = False
         # (Header synchronization handled in add_headers)
 
+    def _desired_row_height(self) -> int:
+        fm = QFontMetrics(self.table.font())
+        market_key = None
+        try:
+            market_key = self.market_dropdown.currentText()
+        except Exception:
+            market_key = None
+        if market_key in ('spreads', 'totals'):
+            return max(fm.lineSpacing() * 3 + 12, 44)
+        return max(fm.lineSpacing() * 2 + 6, 44)
+
+    def _apply_row_heights(self):
+        """Ensure rows are tall enough for stacked odds and keep tables in sync."""
+        try:
+            row_height = self._desired_row_height()
+            vheader = self.table.verticalHeader()
+            fvheader = self.frozen_table.verticalHeader()
+            vheader.setSectionResizeMode(QHeaderView.Fixed)
+            fvheader.setSectionResizeMode(QHeaderView.Fixed)
+            vheader.setDefaultSectionSize(row_height)
+            fvheader.setDefaultSectionSize(row_height)
+            try:
+                vheader.setMinimumSectionSize(row_height)
+                vheader.setMaximumSectionSize(row_height)
+                fvheader.setMinimumSectionSize(row_height)
+                fvheader.setMaximumSectionSize(row_height)
+            except Exception:
+                pass
+            for r in range(self.table.rowCount()):
+                self.table.setRowHeight(r, row_height)
+                self.frozen_table.setRowHeight(r, row_height)
+        except Exception:
+            pass
+
     def populate_table_rows(self, event):
         market_key = self.market_dropdown.currentText()
 
@@ -879,6 +1001,10 @@ class CurrentOddsWindow(QMainWindow):
         for idx, outcome_name in enumerate(outcome_names):
             row = self.table.rowCount()
             self.table.insertRow(row)
+            try:
+                self.table.setRowHeight(row, self._desired_row_height())
+            except Exception:
+                pass
             try:
                 # map this table row back to the source event id for detail views
                 if not hasattr(self, '_row_event_map') or self._row_event_map is None:
@@ -936,7 +1062,24 @@ class CurrentOddsWindow(QMainWindow):
             weights = []
             method_used = event.get('_spread_method', 'native')
 
-            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=5):
+            # Compute average market hold across available books for this event/market
+            hold_values = []
+            for bm in event.get('bookmakers', []):
+                market = next((m for m in bm.get('markets', []) if m.get('key') == market_key), None)
+                if not market:
+                    continue
+                try:
+                    total_prob = sum(
+                        odds_converter(ODDS_FORMAT, 'probability', o.get('price'))
+                        for o in market.get('outcomes', [])
+                        if o.get('price') is not None
+                    )
+                    hold_values.append(max(total_prob - 1, 0))
+                except Exception:
+                    continue
+            avg_hold = sum(hold_values) / len(hold_values) if hold_values else None
+
+            for col, bookmaker_key in enumerate(self.display_sportsbooks, start=9):
                 bookmaker = next((b for b in event.get('bookmakers', []) if b.get('key') == bookmaker_key), None)
                 if bookmaker:
                     market = next((m for m in bookmaker.get('markets', []) if m.get('key') == market_key), None)
@@ -959,7 +1102,28 @@ class CurrentOddsWindow(QMainWindow):
 
                         if outcome_data:
                             price_display = outcome_data.get('price')
-                            self.table.setItem(row, col, QTableWidgetItem(str(price_display)))
+                            cell_text = str(price_display)
+                            if market_key in ('spreads', 'totals'):
+                                point = outcome_data.get('point')
+                                if point is not None:
+                                    try:
+                                        pval = float(point)
+                                        if market_key == 'spreads':
+                                            point_text = f"{pval:+.1f}" if not pval.is_integer() else f"{pval:+.0f}"
+                                        else:
+                                            pval = abs(pval)
+                                            point_text = f"{pval:.1f}" if not pval.is_integer() else f"{pval:.0f}"
+                                    except Exception:
+                                        point_text = str(point)
+                                    cell_text = f"{point_text}\n{price_display}"
+                            cell_item = QTableWidgetItem(cell_text)
+                            cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            if "\n" in cell_text:
+                                try:
+                                    cell_item.setSizeHint(QSize(0, self._desired_row_height()))
+                                except Exception:
+                                    pass
+                            self.table.setItem(row, col, cell_item)
 
                             # populate spread_display from the first matching bookmaker outcome that has a 'point'
                             if spread_display == "" and market_key == 'spreads' and outcome_data.get('point') is not None:
@@ -987,11 +1151,12 @@ class CurrentOddsWindow(QMainWindow):
             # set Spread cell (compact) in column index 4 (Event, Requery, Event Date, Outcome, Spread)
             self.table.setItem(row, 4, QTableWidgetItem(spread_display))
 
-            # Correct column alignment (after Event, Requery, Event Date, Outcome, Spread, sportsbooks...)
-            consensus_col = len(self.display_sportsbooks) + 5
-            edge_col = consensus_col + 1
-            kelly_col = consensus_col + 2
-            best_sportsbook_col = consensus_col + 3
+            # Correct column alignment (after Event, Requery, Event Date, Outcome, Spread, Hold...)
+            hold_col = 5
+            best_sportsbook_col = 6
+            edge_col = 7
+            kelly_col = 8
+            consensus_col = len(self.display_sportsbooks) + 9
 
             consensus_probability = None
             if probabilities and sum(weights) > 0:
@@ -1036,9 +1201,13 @@ class CurrentOddsWindow(QMainWindow):
                 best_kelly = 0
                 best_sportsbook = None
 
+            if avg_hold is not None:
+                self.table.setItem(row, hold_col, QTableWidgetItem(f"{avg_hold:.2%}"))
+            else:
+                self.table.setItem(row, hold_col, QTableWidgetItem("N/A"))
+            self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
             self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
             self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
-            self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
             # If we marked that this event used an event-level requery for spreads, show an indicator
             try:
                 method_used = event.get('_spread_method', 'native')

@@ -204,7 +204,7 @@ def set_stylesheet(palette: dict[str: str]) -> str:
     }}
 
     QTableWidget::item {{
-        padding: 10px;
+        padding: 0px;
         border-bottom: 1px solid rgba(0,0,0,0.06);
     }}
 
@@ -258,6 +258,19 @@ def set_stylesheet(palette: dict[str: str]) -> str:
     }}
     QPushButton:hover {{
         background-color: {palette['combobox-hover']};
+    }}
+    QPushButton:checked {{
+        background-color: {palette['table-row-hover']};
+    }}
+
+    /* Line edits */
+    QLineEdit {{
+        background-color: transparent;
+        color: {palette['text-light']};
+        border: 1px solid rgba(0,0,0,0.12);
+        padding: 6px 8px;
+        border-radius: 6px;
+        min-height: 28px;
     }}
 
     /* Small helper text */
