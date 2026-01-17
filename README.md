@@ -1,17 +1,18 @@
 # Sports Screen - Odds & Edge Tracker
 
-A PyQt6-based desktop application for tracking and analyzing sports betting odds across multiple sportsbooks. Built to help identify arbitrage opportunities and calculate optimal bet sizing using the Kelly Criterion.
+A PyQt6 desktop application for tracking and analyzing sports betting odds across multiple sportsbooks. Built to compare lines, surface consensus odds, and size bets using the Kelly Criterion.
 
 ## Features
 
-- **Multi-Sportsbook Odds Tracking**: Aggregates odds from 40+ sportsbooks including BetMGM, FanDuel, DraftKings, BetRivers, Bovada, and more
-- **Real-time Odds Updates**: Fetches current odds from The Odds API with support for multiple regions (US, UK, EU, AU)
-- **Kelly Criterion Calculator**: Calculates optimal bet sizing based on probability and odds to maximize long-term growth
-- **Odds Conversion**: Converts between different odds formats (Decimal, American, Fractional, Probability)
-- **Multi-Sport Support**: Tracks odds for various sports including NFL, NBA, MLB, soccer, and more
-- **Dark/Light Theme UI**: Customizable interface with dark and light color palettes
-- **Responsive GUI**: Built with PyQt6 for a native desktop experience
-- **Timezone Handling**: Automatic conversion to Eastern Time for event times
+- **Current + Futures Odds**: Dedicated views for live/upcoming games and outrights
+- **Multi-Sportsbook Board**: Compare selected sportsbooks side by side with icon headers
+- **Consensus + Edge**: Pinnacle-weighted consensus odds, edge, and best-book highlighting
+- **Spread Consensus by Mode**: Uses alternate spreads to normalize lines and compare apples-to-apples
+- **Odds Format Toggle**: Live switching between American, Decimal, and Probability
+- **Kelly Bet $ Sizing**: Kelly output shown as a dollar amount based on each book’s bankroll
+- **Pre-Game / Live Filter**: Filter events by commence time with live counts
+- **Export CSV**: Quick export of the current table
+- **Themes + Preferences**: Dark/light themes and persisted user settings
 
 ## Project Structure
 
@@ -23,9 +24,10 @@ sports_screen/
 │   ├── config.py             # Configuration and settings
 │   └── utils.py              # Utility functions (Kelly criterion, odds conversion, etc.)
 ├── data/
-│   └── API/
-│       ├── key.env           # API keys (do not commit)
-│       └── Kalshi_Read.txt    # Kalshi API documentation/reference
+│   ├── API/
+│   │   └── key.env           # API keys (do not commit)
+│   ├── sportsbook_svgs/       # Sportsbook icons
+│   └── user_prefs.json        # Saved preferences (auto-generated)
 ├── env/                       # Python virtual environment
 └── requirements.txt           # Project dependencies
 ```
@@ -61,13 +63,11 @@ sports_screen/
    ```
 
 4. **Configure API Keys**
-   - Copy `.env.example` to `.env` (or create `data/API/key.env`)
-   - Add your API keys:
+   - Create `data/API/key.env`
+   - Add your Odds API keys:
      ```
-     RAPIDAPI_KEY=your_rapidapi_key
      THEODDSAPI_KEY_TEST=your_test_key
      THEODDSAPI_KEY_PROD=your_production_key
-     KALSHIAPI_KEY=your_kalshi_key
      ```
 
 ## Usage
@@ -80,24 +80,27 @@ python src/sports_screen.py
 
 ### Main Window
 
-- **Sportsbook Selection**: Choose which sportsbooks to display odds from
-- **Odds Format**: View odds in Decimal, American, or Fractional format
-- **Kelly Criterion**: Input probability estimates to calculate optimal bet sizing
-- **Theme Toggle**: Switch between dark and light UI themes
+- **Set Up User Sportsbooks**: Select display books and enter bankrolls (leave $0 for display-only)
+- **Monitor Current Odds**: Live board with filters, search, and export
+- **Review Historical Betslips**: Placeholder for future functionality
+- **Quick Start**: Opens current odds using saved preferences
+
+### Current Odds Window
+
+- **Filters**: Sport, Market (Moneyline/Spreads/Totals), Period, Pre‑Game/Live
+- **Odds Type**: American, Decimal, Probability
+- **Quick Actions**: Refresh, Export CSV, Reset Filters
+- **Consensus**: Pinnacle-weighted consensus; spreads use alternate_spreads to align lines
+
+### Futures Odds Window
+
+- **Filters**: Sport, Pre‑Game/Live, Odds Type
+- **Quick Actions**: Refresh, Export CSV, Reset Filters
 
 ## API Keys
 
-This application uses the following APIs:
-
-- **The Odds API** (https://the-odds-api.com/) - Primary source for sports betting odds
-  - Free tier available (limited requests)
-  - Supports 40+ sportsbooks across multiple regions
-  
-- **Kalshi API** - Additional market data (optional)
-
-- **RapidAPI** - Secondary data source (optional)
-
-Get your API keys from their respective websites and add them to your `.env` file.
+This application uses **The Odds API** (https://the-odds-api.com/) as its data source.
+Get your keys from the Odds API dashboard and add them to `data/API/key.env`.
 
 ## Key Functions
 
@@ -115,7 +118,6 @@ Where:
 Supports conversion between:
 - **Decimal** (1.50, 2.00, etc.)
 - **American** (-110, +150, etc.)
-- **Fractional** (1/2, 3/1, etc.)
 - **Probability** (0.0 - 1.0)
 
 ## Dependencies
@@ -124,24 +126,16 @@ Major dependencies include:
 - **PyQt6** - GUI framework
 - **requests** - HTTP library for API calls
 - **python-dotenv** - Environment variable management
-- **pandas** - Data manipulation
-- **numpy** - Numerical computing
 - **rich** - Terminal formatting
-- **pytz** - Timezone handling
+- **pytz/zoneinfo** - Timezone handling
 
 See `requirements.txt` for the complete list.
 
 ## Development
 
-### Running in Development Mode
-
-The application is designed to work with both test and production API keys. By default, it uses the test key when first launched.
-
 ### Data Storage
 
-- Raw odds data can be saved to `data/raw/`
-- API responses are cached in JSON format
-- Last pull timestamp is stored in `data/API/last_pulled.json`
+- Preferences are saved to `data/user_prefs.json`
 
 ## Supported Sportsbooks
 
