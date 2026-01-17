@@ -4,8 +4,7 @@ import os
 import json
 import re
 from typing import Generator, Union, Optional, Dict, List
-from datetime import datetime, timedelta
-import pytz
+from datetime import datetime, timedelta, timezone
 import tempfile
 import time
 
@@ -67,17 +66,41 @@ def date_range(
             yield current_date.isoformat() + 'Z'
         current_date += step
 
+try:
+    from zoneinfo import ZoneInfo
+
+    _EASTERN_ZONE = ZoneInfo("America/New_York")
+    _UTC_ZONE = timezone.utc
+except Exception:
+    import pytz
+
+    _UTC_ZONE = pytz.timezone("UTC")
+    _EASTERN_ZONE = pytz.timezone("America/New_York")
+
+
+def _ensure_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt
+    if hasattr(_UTC_ZONE, "localize"):
+        return _UTC_ZONE.localize(dt)
+    return dt.replace(tzinfo=_UTC_ZONE)
+
+
 def convert_to_eastern(utc_timestamp: str) -> str:
     """Converts a UTC timestamp to Eastern Time (ET) and formats it for tabular display."""
-    utc_zone = pytz.timezone("UTC")
-    eastern_zone = pytz.timezone("America/New_York")
+    if not utc_timestamp:
+        return ""
 
-    # Parse the UTC timestamp
-    utc_time = datetime.strptime(utc_timestamp, "%Y-%m-%dT%H:%M:%SZ")
-    utc_time = utc_zone.localize(utc_time)
+    try:
+        utc_time = datetime.fromisoformat(utc_timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            utc_time = datetime.strptime(utc_timestamp, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return str(utc_timestamp)
 
-    # Convert to Eastern Time
-    eastern_time = utc_time.astimezone(eastern_zone)
+    utc_time = _ensure_aware(utc_time)
+    eastern_time = utc_time.astimezone(_EASTERN_ZONE)
 
     # Format for display (e.g., 'Mon, Jun 27, 2022 - 08:00 PM ET')
     return eastern_time.strftime("%a, %b %d, %Y - %I:%M %p ET")
