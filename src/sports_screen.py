@@ -3,14 +3,16 @@
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget,
     QLabel, QScrollArea, QTableWidget, QTableWidgetItem,
-    QHeaderView, QHBoxLayout, QCheckBox, QComboBox,
+    QHeaderView, QHBoxLayout, QGridLayout, QCheckBox, QComboBox,
     QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox,
-    QLineEdit, QButtonGroup, QStyledItemDelegate, QStyle
+    QLineEdit, QButtonGroup, QStyledItemDelegate, QStyle, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize, QRectF
 from PyQt6.QtGui import QColor, QBrush, QFont, QFontMetrics, QPainter, QPixmap, QPalette
 import sys
 import os
+import csv
+from datetime import datetime
 from the_odds_api import OddsAPI
 from config import (
     PALETTE, PALETTES, THEODDSAPI_KEY_TEST, THEODDSAPI_KEY_PROD, ODDS_FORMAT
@@ -82,6 +84,30 @@ def _set_header_label_content(label: QLabel, sportsbook_key: str, display_name: 
     label.setPixmap(QPixmap())
     label.setText(display_name)
     label.setToolTip("")
+
+
+def _export_table_to_csv(parent: QWidget, table: QTableWidget, default_prefix: str) -> None:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    default_name = f"{default_prefix}_{timestamp}.csv"
+    path, _ = QFileDialog.getSaveFileName(parent, "Export CSV", default_name, "CSV Files (*.csv)")
+    if not path:
+        return
+    try:
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            headers = []
+            for col in range(table.columnCount()):
+                item = table.horizontalHeaderItem(col)
+                headers.append(item.text() if item else "")
+            writer.writerow(headers)
+            for row in range(table.rowCount()):
+                row_values = []
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    row_values.append(item.text() if item else "")
+                writer.writerow(row_values)
+    except Exception as exc:
+        print(f"Export failed: {exc}")
 
 
 class EventDetailsDialog(QDialog):
@@ -300,25 +326,34 @@ class UserSportsbookSelectionWindow(QMainWindow):
 
         self.scroll_area = QScrollArea(self)
         self.scroll_area_widget = QWidget()
-        self.scroll_area_layout = QVBoxLayout(self.scroll_area_widget)
+        self.scroll_area_layout = QGridLayout(self.scroll_area_widget)
+        self.scroll_area_layout.setHorizontalSpacing(16)
+        self.scroll_area_layout.setVerticalSpacing(10)
+        self.scroll_area_layout.setColumnStretch(0, 1)
+        self.scroll_area_layout.setColumnStretch(1, 0)
+
+        header_name = QLabel("Sportsbook", self)
+        header_bankroll = QLabel("Bankroll", self)
+        header_name.setStyleSheet("font-weight: 700;")
+        header_bankroll.setStyleSheet("font-weight: 700;")
+        self.scroll_area_layout.addWidget(header_name, 0, 0)
+        self.scroll_area_layout.addWidget(header_bankroll, 0, 1)
 
         self.sportsbook_widgets = {}
-        for key, title in self.sportsbook_mapping.items():
+        for row_idx, (key, title) in enumerate(self.sportsbook_mapping.items(), start=1):
             checkbox = QCheckBox(title, self)
             bankroll_input = QDoubleSpinBox(self)
             bankroll_input.setRange(0.0, 1000000.0)
             bankroll_input.setPrefix("$")
             bankroll_input.setDecimals(2)
+            bankroll_input.setMinimumWidth(120)
+            bankroll_input.setMinimumHeight(30)
+            bankroll_input.setToolTip("Enter $0 to show odds without tracking bankroll.")
 
             self.sportsbook_widgets[key] = (checkbox, bankroll_input)
-
-            h_layout = QHBoxLayout()
-            h_layout.addWidget(checkbox)
-            h_layout.addWidget(bankroll_input)
-
-            container = QWidget()
-            container.setLayout(h_layout)
-            self.scroll_area_layout.addWidget(container)
+            self.scroll_area_layout.addWidget(checkbox, row_idx, 0)
+            self.scroll_area_layout.addWidget(bankroll_input, row_idx, 1)
+            self.scroll_area_layout.setRowMinimumHeight(row_idx, 34)
 
         self.scroll_area.setWidget(self.scroll_area_widget)
         self.scroll_area.setWidgetResizable(True)
@@ -340,23 +375,26 @@ class UserSportsbookSelectionWindow(QMainWindow):
         except Exception:
             pass
 
+        actions_layout = QHBoxLayout()
         self.select_all_button = QPushButton("Select All", self)
         self.select_all_button.clicked.connect(self.select_all)
-        main_layout.addWidget(self.select_all_button)
+        actions_layout.addWidget(self.select_all_button)
 
         # Quick preset: select popular sportsbooks
         self.select_popular_button = QPushButton("Select Popular", self)
         self.select_popular_button.setToolTip("Check a preset of popular sportsbooks")
         self.select_popular_button.clicked.connect(self.select_popular)
-        main_layout.addWidget(self.select_popular_button)
+        actions_layout.addWidget(self.select_popular_button)
 
         self.deselect_all_button = QPushButton("Clear Selections", self)
         self.deselect_all_button.clicked.connect(self.deselect_all)
-        main_layout.addWidget(self.deselect_all_button)
+        actions_layout.addWidget(self.deselect_all_button)
 
+        actions_layout.addStretch(1)
         self.save_button = QPushButton("Save", self)
         self.save_button.clicked.connect(self.save_selections)
-        main_layout.addWidget(self.save_button)
+        actions_layout.addWidget(self.save_button)
+        main_layout.addLayout(actions_layout)
 
     def select_all(self):
         for _, widget in self.sportsbook_widgets.items():
@@ -615,26 +653,52 @@ class CurrentOddsWindow(QMainWindow):
         self.selected_accounts = selected_accounts
         self.sportsbook_mapping = sportsbook_mapping
         self.display_sportsbooks = display_sportsbooks
+        self._display_odds_format = ODDS_FORMAT
+        self._api_odds_format = ODDS_FORMAT if ODDS_FORMAT in ("american", "decimal") else "decimal"
+        self._sport_title_map = self._build_sport_title_map()
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         main_layout = QVBoxLayout(self.central_widget)
         self.central_widget.setLayout(main_layout)
 
-        # Top selector bar (odds-first, compact)
+        # Filters bar
+        filters_box = QWidget(self)
+        filters_box.setObjectName("filtersBox")
+        filters_layout = QVBoxLayout(filters_box)
+        filters_layout.setContentsMargins(8, 6, 8, 6)
+        filters_layout.setSpacing(4)
+
+        filters_title = QLabel("Filters", self)
+        filters_title.setStyleSheet("font-weight:700;")
+        filters_layout.addWidget(filters_title)
+        self.sport_summary_label = QLabel("", self)
+        self.sport_summary_label.setStyleSheet("font-size:11px;color:gray;")
+        filters_layout.addWidget(self.sport_summary_label)
+        self.sport_summary_label = QLabel("", self)
+        self.sport_summary_label.setStyleSheet("font-size:11px;color:gray;")
+        filters_layout.addWidget(self.sport_summary_label)
+
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
 
         # Sport Selection Dropdown
         self.sport_dropdown = QComboBox(self)
-        self.sport_dropdown.addItems(self.selected_sports)
-        self.sport_dropdown.currentTextChanged.connect(self.update_sport)
+        for sport_key in self.selected_sports:
+            self.sport_dropdown.addItem(self._display_sport_title(sport_key), sport_key)
+        self.sport_dropdown.currentIndexChanged.connect(self._on_sport_changed)
         top_bar.addWidget(self.sport_dropdown)
 
         # Market Selection Dropdown
         self.market_dropdown = QComboBox(self)
-        self.market_dropdown.addItems(["h2h", "spreads", "totals"])
-        self.market_dropdown.currentTextChanged.connect(self.update_table)
+        self._market_label_map = {
+            "h2h": "Moneyline",
+            "spreads": "Spreads",
+            "totals": "Totals",
+        }
+        for key, label in self._market_label_map.items():
+            self.market_dropdown.addItem(label, key)
+        self.market_dropdown.currentIndexChanged.connect(self.update_table)
         top_bar.addWidget(self.market_dropdown)
 
         # Period Selection Dropdown (placeholder for future wiring)
@@ -654,6 +718,9 @@ class CurrentOddsWindow(QMainWindow):
         self.live_toggle_group.addButton(self.live_button)
         top_bar.addWidget(self.pregame_button)
         top_bar.addWidget(self.live_button)
+        self.live_toggle_group.buttonClicked.connect(lambda _: self.update_table())
+        self.live_counts_label = QLabel("Pre-Game: -- | Live: --", self)
+        top_bar.addWidget(self.live_counts_label)
 
         top_bar.addStretch(1)
 
@@ -671,17 +738,48 @@ class CurrentOddsWindow(QMainWindow):
             pass
         top_bar.addWidget(self.search_input)
 
-        # Odds format selector (UI only for now)
+        # Odds format selector
         self.odds_format_dropdown = QComboBox(self)
         self.odds_format_dropdown.addItems(["American", "Decimal", "Probability"])
+        self._odds_format_map = {
+            "American": "american",
+            "Decimal": "decimal",
+            "Probability": "probability",
+        }
+        self._display_odds_format = ODDS_FORMAT
+        self._api_odds_format = ODDS_FORMAT if ODDS_FORMAT in ("american", "decimal") else "decimal"
+        self._load_odds_format_pref()
+        self.odds_format_dropdown.currentTextChanged.connect(self._on_odds_format_changed)
         top_bar.addWidget(self.odds_format_dropdown)
 
-        # Refresh button (moved to top bar)
+        filters_layout.addLayout(top_bar)
+        main_layout.addWidget(filters_box)
+
+        # restore last sport if available
+        try:
+            prefs = load_user_prefs()
+            last_sport = prefs.get('last_sport') if isinstance(prefs, dict) else None
+            if last_sport in self.selected_sports:
+                self.sport_dropdown.setCurrentIndex(self.selected_sports.index(last_sport))
+        except Exception:
+            pass
+        self.current_sport = self.sport_dropdown.currentData() or self.current_sport
+        self._update_sport_summary()
+
+        self._update_sport_summary()
+
+        quick_actions = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh", self)
         self.refresh_button.clicked.connect(self.update_table)
-        top_bar.addWidget(self.refresh_button)
-
-        main_layout.addLayout(top_bar)
+        quick_actions.addWidget(self.refresh_button)
+        self.export_button = QPushButton("Export CSV", self)
+        self.export_button.clicked.connect(self._export_csv)
+        quick_actions.addWidget(self.export_button)
+        self.reset_filters_button = QPushButton("Reset Filters", self)
+        self.reset_filters_button.clicked.connect(self._reset_filters)
+        quick_actions.addWidget(self.reset_filters_button)
+        quick_actions.addStretch(1)
+        main_layout.addLayout(quick_actions)
 
         # Status row (compact)
         status_row = QHBoxLayout()
@@ -691,6 +789,8 @@ class CurrentOddsWindow(QMainWindow):
         # Event IDs load status
         self.event_ids_status_label = QLabel("Event IDs: Not loaded", self)
         status_row.addWidget(self.event_ids_status_label)
+        self.last_refresh_label = QLabel("Last refresh: --", self)
+        status_row.addWidget(self.last_refresh_label)
         status_row.addStretch(1)
         main_layout.addLayout(status_row)
 
@@ -739,8 +839,29 @@ class CurrentOddsWindow(QMainWindow):
 
         self.update_requests_remaining()
 
+    def _build_sport_title_map(self):
+        try:
+            sports = odds_api.get_sports() or []
+            return {s.get('key'): s.get('title') or s.get('key') for s in sports if s.get('key')}
+        except Exception:
+            return {}
+
+    def _display_sport_title(self, sport_key: str) -> str:
+        title = self._sport_title_map.get(sport_key)
+        if title:
+            return title
+        return str(sport_key).replace("_", " ").title()
+
+    def _on_sport_changed(self, idx: int):
+        sport_key = self.sport_dropdown.itemData(idx) or self.sport_dropdown.currentText()
+        self.update_sport(sport_key)
+
+    def _current_market_key(self) -> str:
+        return self.market_dropdown.currentData() or self.market_dropdown.currentText()
+
     def update_sport(self, sport):
         self.current_sport = sport
+        self._update_sport_summary()
         try:
             prefs = load_user_prefs()
             if not isinstance(prefs, dict):
@@ -759,6 +880,105 @@ class CurrentOddsWindow(QMainWindow):
             print(f"Error fetching requests remaining: {e}")
             self.requests_remaining_label.setText("Requests Remaining: Error")
 
+    def _update_sport_summary(self):
+        try:
+            total = len(self.selected_sports) if isinstance(self.selected_sports, list) else 0
+            if total <= 1:
+                summary = f"Sports: {self._display_sport_title(self.current_sport)}"
+            else:
+                summary = f"Sports: {self._display_sport_title(self.current_sport)} + {total - 1} more"
+            self.sport_summary_label.setText(summary)
+        except Exception:
+            self.sport_summary_label.setText("")
+
+    def set_event_ids_map(self, mapping: dict):
+        """Store event id mapping and update UI label."""
+        try:
+            self._event_ids_map = mapping or {}
+            total = sum(len(v) for v in self._event_ids_map.values()) if isinstance(self._event_ids_map, dict) else 0
+            self.event_ids_status_label.setText(f"Event IDs: {total} loaded")
+        except Exception:
+            self.event_ids_status_label.setText("Event IDs: Error")
+
+    def _load_odds_format_pref(self):
+        try:
+            prefs = load_user_prefs()
+        except Exception:
+            prefs = {}
+        pref_fmt = None
+        if isinstance(prefs, dict):
+            pref_fmt = prefs.get('odds_format')
+
+        if pref_fmt not in ('american', 'decimal', 'probability'):
+            pref_fmt = ODDS_FORMAT if ODDS_FORMAT in ('american', 'decimal', 'probability') else 'american'
+
+        self._display_odds_format = pref_fmt
+        self._api_odds_format = pref_fmt if pref_fmt in ('american', 'decimal') else 'decimal'
+
+        # set dropdown to match preference
+        for label, fmt in self._odds_format_map.items():
+            if fmt == pref_fmt:
+                idx = self.odds_format_dropdown.findText(label)
+                if idx >= 0:
+                    self.odds_format_dropdown.setCurrentIndex(idx)
+                break
+
+    def _on_odds_format_changed(self, label: str):
+        fmt = self._odds_format_map.get(label, 'american')
+        self._display_odds_format = fmt
+        self._api_odds_format = fmt if fmt in ('american', 'decimal') else 'decimal'
+        try:
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['odds_format'] = fmt
+            save_user_prefs(prefs)
+        except Exception:
+            pass
+        self.update_table()
+
+    def _format_odds_value(self, price):
+        if price is None:
+            return "N/A"
+        api_fmt = self._api_odds_format
+        disp_fmt = self._display_odds_format
+        try:
+            if disp_fmt == api_fmt:
+                if disp_fmt == 'american':
+                    ival = int(round(float(price)))
+                    return f"{ival:+d}" if ival > 0 else f"{ival}"
+                if disp_fmt == 'decimal':
+                    return f"{float(price):.2f}"
+            prob = odds_converter(api_fmt, 'probability', price)
+            if disp_fmt == 'probability':
+                return f"{prob:.1%}"
+            converted = odds_converter('probability', disp_fmt, prob)
+            if disp_fmt == 'american':
+                ival = int(round(float(converted)))
+                return f"{ival:+d}" if ival > 0 else f"{ival}"
+            if disp_fmt == 'decimal':
+                return f"{float(converted):.2f}"
+            return str(converted)
+        except Exception:
+            return str(price)
+
+    def _format_probability(self, prob):
+        if prob is None:
+            return "N/A"
+        disp_fmt = self._display_odds_format
+        try:
+            if disp_fmt == 'probability':
+                return f"{prob:.1%}"
+            converted = odds_converter('probability', disp_fmt, prob)
+            if disp_fmt == 'american':
+                ival = int(round(float(converted)))
+                return f"{ival:+d}" if ival > 0 else f"{ival}"
+            if disp_fmt == 'decimal':
+                return f"{float(converted):.2f}"
+            return str(converted)
+        except Exception:
+            return "N/A"
+
     def go_back(self):
         self.sport_selection_window = SportSelectionWindow(
             self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks
@@ -775,68 +995,75 @@ class CurrentOddsWindow(QMainWindow):
 
         try:
             odds_data = self.fetch_odds_data()
+            self._update_live_counts(odds_data)
+            odds_data = self._filter_by_live_toggle(odds_data)
             # cache fetched data for detail views
             self._last_odds_data = odds_data
             # If market is spreads or totals, compute consensus point per event and try
             # to fetch event-level odds for that exact point to make apples-to-apples comparisons.
-            market_type = self.market_dropdown.currentText()
+            market_type = self._current_market_key()
             if market_type in ('spreads', 'totals') and isinstance(odds_data, list):
-                event_target_points = {}
-                for event in odds_data:
-                    cp, fav = compute_consensus_point(event, market_type)
-                    if cp is not None:
-                        # store rounded consensus and favorite (if any)
-                        try:
-                            event['_consensus_point'] = cp
-                            if market_type == 'spreads':
-                                # favorite is only meaningful for spreads
-                                event['_consensus_favorite'] = fav
-                        except Exception:
-                            pass
-                        event_target_points[event.get('id')] = cp
-
-                # Check remaining requests and only proceed if we have enough quota
-                try:
-                    remaining = odds_api.get_remaining_requests()
-                except Exception:
-                    remaining = 0
-
-                needed = len(event_target_points)
-                if needed > 0 and remaining >= needed:
+                if market_type == 'totals':
                     for event in odds_data:
-                        eid = event.get('id')
-                        if eid in event_target_points:
-                            target = event_target_points[eid]
+                        cp, fav = compute_consensus_point(event, market_type)
+                        if cp is not None:
+                            try:
+                                event['_consensus_point'] = cp
+                            except Exception:
+                                pass
+                else:
+                    # spreads: use alternate_spreads from event odds to pick a mode point
+                    try:
+                        remaining = odds_api.get_remaining_requests()
+                    except Exception:
+                        remaining = 0
+
+                    needed = len(odds_data or [])
+                    if needed > 0 and remaining >= needed:
+                        for event in odds_data:
+                            eid = event.get('id')
+                            if not eid:
+                                continue
                             try:
                                 ev_odds = odds_api.get_event_odds(
                                     self.current_sport,
                                     eid,
-                                    markets='spreads',
-                                    odds_format=ODDS_FORMAT,
+                                    markets='alternate_spreads',
+                                    odds_format=self._api_odds_format,
                                     bookmakers=','.join(self.display_sportsbooks)
                                 )
                                 # ev_odds is expected to be a list with single event dict
                                 if isinstance(ev_odds, list) and len(ev_odds) > 0:
                                     ev = ev_odds[0]
+                                    cp, fav = compute_consensus_point(ev, 'spreads', market_key='alternate_spreads')
+                                    if cp is not None:
+                                        try:
+                                            event['_consensus_point'] = cp
+                                            event['_consensus_favorite'] = fav
+                                        except Exception:
+                                            pass
                                     for b in ev.get('bookmakers', []):
                                         orig_b = next((ob for ob in event.get('bookmakers', []) if ob.get('key') == b.get('key')), None)
                                         if not orig_b:
                                             continue
-                                        ev_market = next((m for m in b.get('markets', []) if m.get('key') == 'spreads'), None)
+                                        ev_market = next((m for m in b.get('markets', []) if m.get('key') == 'alternate_spreads'), None)
                                         if not ev_market:
-                                            continue
-                                            # Filter outcomes to those matching the absolute target point (both sides)
-                                            matched = [o for o in ev_market.get('outcomes', []) if 'point' in o and abs(abs(float(o.get('point', 0))) - abs(target)) < 1e-6]
-                                        if matched:
-                                            # replace original spreads outcomes with the exact-point ones
-                                            orig_market = next((m for m in orig_b.get('markets', []) if m.get('key') == 'spreads'), None)
-                                            if orig_market:
-                                                orig_market['outcomes'] = matched
-                                                # mark that we used an event-level requery for this event's spreads
-                                                try:
-                                                    event['_spread_method'] = 'requery'
-                                                except Exception:
-                                                    pass
+                                            ev_market = None
+                                        # Filter outcomes to those matching the absolute target point (both sides)
+                                        matched = []
+                                        if ev_market and cp is not None:
+                                            matched = [
+                                                o for o in ev_market.get('outcomes', [])
+                                                if 'point' in o and abs(abs(float(o.get('point', 0))) - abs(cp)) < 1e-6
+                                            ]
+                                        # replace original spreads outcomes with the exact-point ones (even if empty)
+                                        orig_market = next((m for m in orig_b.get('markets', []) if m.get('key') == 'spreads'), None)
+                                        if orig_market is not None:
+                                            orig_market['outcomes'] = matched
+                                            try:
+                                                event['_spread_method'] = 'alternate_spreads'
+                                            except Exception:
+                                                pass
                             except Exception as e:
                                 print(f"Failed to fetch event-level odds for {eid}: {e}")
 
@@ -865,45 +1092,131 @@ class CurrentOddsWindow(QMainWindow):
                 pass
 
             self._apply_row_heights()
+            try:
+                self.last_refresh_label.setText(f"Last refresh: {datetime.now().strftime('%I:%M:%S %p')}")
+            except Exception:
+                pass
 
         except Exception as e:
             print(f"Error updating table: {e}")
+            try:
+                self.last_refresh_label.setText("Last refresh: error")
+            except Exception:
+                pass
 
     def fetch_odds_data(self):
         response = odds_api.get_odds(
             sport=self.current_sport,
-            markets=self.market_dropdown.currentText(),
-            odds_format=ODDS_FORMAT,
+            markets=self._current_market_key(),
+            odds_format=self._api_odds_format,
             bookmakers=','.join(self.display_sportsbooks)
         )
         print(response)
         return response
+
+    def _parse_commence_time(self, commence_time):
+        if not commence_time:
+            return None
+        try:
+            return datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _is_live_event(self, event):
+        dt = self._parse_commence_time(event.get('commence_time'))
+        if dt is None:
+            return False
+        try:
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.utcnow()
+        except Exception:
+            now = datetime.utcnow()
+        return dt <= now
+
+    def _update_live_counts(self, odds_data):
+        try:
+            total_live = 0
+            total_pre = 0
+            for event in odds_data or []:
+                if self._is_live_event(event):
+                    total_live += 1
+                else:
+                    total_pre += 1
+            self.live_counts_label.setText(f"Pre-Game: {total_pre} | Live: {total_live}")
+        except Exception:
+            self.live_counts_label.setText("Pre-Game: -- | Live: --")
+
+    def _filter_by_live_toggle(self, odds_data):
+        try:
+            if self.live_button.isChecked():
+                return [e for e in odds_data or [] if self._is_live_event(e)]
+            return [e for e in odds_data or [] if not self._is_live_event(e)]
+        except Exception:
+            return odds_data
+
+    def _export_csv(self):
+        _export_table_to_csv(self, self.table, f"current_odds_{self.current_sport}")
+
+    def _reset_filters(self):
+        try:
+            if self.selected_sports:
+                self.sport_dropdown.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.market_dropdown.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.period_dropdown.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.pregame_button.setChecked(True)
+        except Exception:
+            pass
+        try:
+            self.search_input.setText("")
+        except Exception:
+            pass
+        try:
+            self._load_odds_format_pref()
+        except Exception:
+            pass
+        self.update_table()
 
     def process_odds_data(self, odds_data):
         for event in odds_data:
             for bookmaker in event['bookmakers']:
                 for market in bookmaker['markets']:
                     total_prob = sum(
-                        odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        odds_converter(self._api_odds_format, "probability", outcome["price"])
                         for outcome in market["outcomes"]
                     )
                     for outcome in market["outcomes"]:
-                        prob = odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        prob = odds_converter(self._api_odds_format, "probability", outcome["price"])
                         no_vig_prob = prob / total_prob if total_prob > 0 else 0
-                        outcome["no_vig_price"] = odds_converter("probability", ODDS_FORMAT, no_vig_prob)
+                        outcome["no_vig_price"] = odds_converter("probability", self._api_odds_format, no_vig_prob)
 
     def add_headers(self):
         # Dynamic label: show 'Point' for totals market, 'Spread' for spreads
-        point_label = "Point" if self.market_dropdown.currentText() == 'totals' else "Spread"
-        headers = ["Event", "Outcome", point_label, "Hold", "Best Sportsbook", "Positive Edge", "Kelly Bet"] + [
+        point_label = "Point" if self._current_market_key() == 'totals' else "Spread"
+        headers = ["Event", "Outcome", point_label, "Hold", "Best\nBook", "Positive\nEdge", "Kelly\nBet"] + [
             self.sportsbook_mapping[bookmaker]
             for bookmaker in self.display_sportsbooks
-        ] + ["Consensus Odds"]
+        ] + ["Consensus\nOdds"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         try:
             header = self.table.horizontalHeader()
             header.setFixedHeight(SPORTSBOOK_HEADER_HEIGHT)
+            header.setSectionsMovable(False)
+            header.setSectionsClickable(False)
+            header.setHighlightSections(False)
+            header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+            hdr_font = header.font()
+            if hdr_font.pointSize() > 9:
+                hdr_font.setPointSize(hdr_font.pointSize() - 1)
+            header.setFont(hdr_font)
         except Exception:
             pass
         sportsbook_start = 7
@@ -979,7 +1292,7 @@ class CurrentOddsWindow(QMainWindow):
         fm = QFontMetrics(self.table.font())
         market_key = None
         try:
-            market_key = self.market_dropdown.currentText()
+            market_key = self._current_market_key()
         except Exception:
             market_key = None
         if market_key in ('spreads', 'totals'):
@@ -1004,7 +1317,7 @@ class CurrentOddsWindow(QMainWindow):
             pass
 
     def populate_table_rows(self, event):
-        market_key = self.market_dropdown.currentText()
+        market_key = self._current_market_key()
 
         home = event.get('home_team') or ''
         away = event.get('away_team') or ''
@@ -1109,7 +1422,7 @@ class CurrentOddsWindow(QMainWindow):
                     continue
                 try:
                     total_prob = sum(
-                        odds_converter(ODDS_FORMAT, 'probability', o.get('price'))
+                        odds_converter(self._api_odds_format, 'probability', o.get('price'))
                         for o in market.get('outcomes', [])
                         if o.get('price') is not None
                     )
@@ -1141,7 +1454,8 @@ class CurrentOddsWindow(QMainWindow):
 
                         if outcome_data:
                             price_display = outcome_data.get('price')
-                            cell_text = str(price_display)
+                            price_text = self._format_odds_value(price_display)
+                            cell_text = str(price_text)
                             if market_key in ('spreads', 'totals'):
                                 point = outcome_data.get('point')
                                 if point is not None:
@@ -1154,7 +1468,7 @@ class CurrentOddsWindow(QMainWindow):
                                             point_text = f"{pval:.1f}" if not pval.is_integer() else f"{pval:.0f}"
                                     except Exception:
                                         point_text = str(point)
-                                    cell_text = f"{point_text}\n{price_display}"
+                                    cell_text = f"{point_text}\n{price_text}"
                             cell_item = QTableWidgetItem(cell_text)
                             cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                             if "\n" in cell_text:
@@ -1176,10 +1490,10 @@ class CurrentOddsWindow(QMainWindow):
                             # Use no_vig_price if precomputed, else compute probability directly
                             no_vig = outcome_data.get('no_vig_price') if 'no_vig_price' in outcome_data else None
                             if no_vig is not None:
-                                probabilities.append(odds_converter(ODDS_FORMAT, 'probability', no_vig))
+                                probabilities.append(odds_converter(self._api_odds_format, 'probability', no_vig))
                             else:
                                 try:
-                                    prob = odds_converter(ODDS_FORMAT, 'probability', outcome_data.get('price'))
+                                    prob = odds_converter(self._api_odds_format, 'probability', outcome_data.get('price'))
                                     probabilities.append(prob)
                                 except Exception:
                                     pass
@@ -1200,8 +1514,8 @@ class CurrentOddsWindow(QMainWindow):
             consensus_probability = None
             if probabilities and sum(weights) > 0:
                 consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
-                consensus_odds = odds_converter('probability', ODDS_FORMAT, consensus_probability)
-                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+                consensus_display = self._format_probability(consensus_probability)
+                self.table.setItem(row, consensus_col, QTableWidgetItem(consensus_display))
             else:
                 self.table.setItem(row, consensus_col, QTableWidgetItem("N/A"))
 
@@ -1223,10 +1537,10 @@ class CurrentOddsWindow(QMainWindow):
                             user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
                         if user_outcome:
                             try:
-                                user_probability = odds_converter(ODDS_FORMAT, 'probability', user_outcome.get('price'))
+                                user_probability = odds_converter(self._api_odds_format, 'probability', user_outcome.get('price'))
                                 edge = consensus_probability - user_probability
                                 kelly = kelly_criterion(
-                                    consensus_probability, odds_converter(ODDS_FORMAT, 'decimal', user_outcome.get('price'))
+                                    consensus_probability, odds_converter(self._api_odds_format, 'decimal', user_outcome.get('price'))
                                 )
 
                                 if edge > best_edge:
@@ -1246,7 +1560,14 @@ class CurrentOddsWindow(QMainWindow):
                 self.table.setItem(row, hold_col, QTableWidgetItem("N/A"))
             self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
             self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
-            self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
+            kelly_amount_text = "N/A"
+            if best_sportsbook:
+                try:
+                    bankroll = float(self.selected_accounts.get(best_sportsbook, 0))
+                    kelly_amount_text = f"${bankroll * best_kelly:,.2f}"
+                except Exception:
+                    kelly_amount_text = "N/A"
+            self.table.setItem(row, kelly_col, QTableWidgetItem(kelly_amount_text))
             # Conditional formatting for positive edge + best odds cell
             try:
                 if best_edge > 0:
@@ -1296,19 +1617,100 @@ class FuturesOddsWindow(QMainWindow):
         self.selected_accounts = selected_accounts
         self.sportsbook_mapping = sportsbook_mapping
         self.display_sportsbooks = display_sportsbooks
+        self._display_odds_format = ODDS_FORMAT
+        self._api_odds_format = ODDS_FORMAT if ODDS_FORMAT in ("american", "decimal") else "decimal"
+        self._load_odds_format_pref()
+        self._sport_title_map = self._build_sport_title_map()
+
+        # Filters bar
+        filters_box = QWidget(self)
+        filters_box.setObjectName("filtersBox")
+        filters_layout = QVBoxLayout(filters_box)
+        filters_layout.setContentsMargins(8, 6, 8, 6)
+        filters_layout.setSpacing(4)
+
+        filters_title = QLabel("Filters", self)
+        filters_title.setStyleSheet("font-weight:700;")
+        filters_layout.addWidget(filters_title)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         main_layout = QVBoxLayout(self.central_widget)
         self.central_widget.setLayout(main_layout)
 
+        status_row = QHBoxLayout()
         self.requests_remaining_label = QLabel("Requests Remaining: Retrieving...", self)
-        main_layout.addWidget(self.requests_remaining_label)
+        status_row.addWidget(self.requests_remaining_label)
+        self.last_refresh_label = QLabel("Last refresh: --", self)
+        status_row.addWidget(self.last_refresh_label)
+        status_row.addStretch(1)
+        main_layout.addLayout(status_row)
 
+        top_bar = QHBoxLayout()
         self.sport_dropdown = QComboBox(self)
-        self.sport_dropdown.addItems(self.selected_sports)
-        self.sport_dropdown.currentTextChanged.connect(self.update_sport)
-        main_layout.addWidget(self.sport_dropdown)
+        for sport_key in self.selected_sports:
+            self.sport_dropdown.addItem(self._display_sport_title(sport_key), sport_key)
+        self.sport_dropdown.currentIndexChanged.connect(self._on_sport_changed)
+        top_bar.addWidget(self.sport_dropdown)
+
+        self.pregame_button = QPushButton("Pre-Game", self)
+        self.pregame_button.setCheckable(True)
+        self.live_button = QPushButton("Live", self)
+        self.live_button.setCheckable(True)
+        self.pregame_button.setChecked(True)
+        self.live_toggle_group = QButtonGroup(self)
+        self.live_toggle_group.setExclusive(True)
+        self.live_toggle_group.addButton(self.pregame_button)
+        self.live_toggle_group.addButton(self.live_button)
+        top_bar.addWidget(self.pregame_button)
+        top_bar.addWidget(self.live_button)
+        self.live_toggle_group.buttonClicked.connect(lambda _: self.update_table())
+        self.live_counts_label = QLabel("Pre-Game: -- | Live: --", self)
+        top_bar.addWidget(self.live_counts_label)
+
+        self.odds_format_dropdown = QComboBox(self)
+        self.odds_format_dropdown.addItems(["American", "Decimal", "Probability"])
+        self._odds_format_map = {
+            "American": "american",
+            "Decimal": "decimal",
+            "Probability": "probability",
+        }
+        try:
+            current_label = next(k for k, v in self._odds_format_map.items() if v == self._display_odds_format)
+        except Exception:
+            current_label = "American"
+        idx = self.odds_format_dropdown.findText(current_label)
+        if idx >= 0:
+            self.odds_format_dropdown.setCurrentIndex(idx)
+        self.odds_format_dropdown.currentTextChanged.connect(self._on_odds_format_changed)
+        top_bar.addWidget(self.odds_format_dropdown)
+        top_bar.addStretch(1)
+        filters_layout.addLayout(top_bar)
+        main_layout.addWidget(filters_box)
+
+        # restore last sport if available
+        try:
+            prefs = load_user_prefs()
+            last_sport = prefs.get('last_sport') if isinstance(prefs, dict) else None
+            if last_sport in self.selected_sports:
+                self.sport_dropdown.setCurrentIndex(self.selected_sports.index(last_sport))
+        except Exception:
+            pass
+        self.current_sport = self.sport_dropdown.currentData() or self.current_sport
+        self._update_sport_summary()
+
+        quick_actions = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh", self)
+        self.refresh_button.clicked.connect(self.update_table)
+        quick_actions.addWidget(self.refresh_button)
+        self.export_button = QPushButton("Export CSV", self)
+        self.export_button.clicked.connect(self._export_csv)
+        quick_actions.addWidget(self.export_button)
+        self.reset_filters_button = QPushButton("Reset Filters", self)
+        self.reset_filters_button.clicked.connect(self._reset_filters)
+        quick_actions.addWidget(self.reset_filters_button)
+        quick_actions.addStretch(1)
+        main_layout.addLayout(quick_actions)
 
         self.table = QTableWidget()
         self.table.setAlternatingRowColors(True)
@@ -1320,20 +1722,33 @@ class FuturesOddsWindow(QMainWindow):
         self.update_table()
 
         button_layout = QHBoxLayout()
-        self.refresh_button = QPushButton("Refresh", self)
-        self.refresh_button.clicked.connect(self.update_table)
-        button_layout.addWidget(self.refresh_button)
-
         self.back_button = QPushButton("Back to Sport Selection", self)
         self.back_button.clicked.connect(self.go_back)
         button_layout.addWidget(self.back_button)
-
         main_layout.addLayout(button_layout)
 
         self.update_requests_remaining()
 
+    def _build_sport_title_map(self):
+        try:
+            sports = odds_api.get_sports() or []
+            return {s.get('key'): s.get('title') or s.get('key') for s in sports if s.get('key')}
+        except Exception:
+            return {}
+
+    def _display_sport_title(self, sport_key: str) -> str:
+        title = self._sport_title_map.get(sport_key)
+        if title:
+            return title
+        return str(sport_key).replace("_", " ").title()
+
+    def _on_sport_changed(self, idx: int):
+        sport_key = self.sport_dropdown.itemData(idx) or self.sport_dropdown.currentText()
+        self.update_sport(sport_key)
+
     def update_sport(self, sport):
         self.current_sport = sport
+        self._update_sport_summary()
         self.update_table()
 
     def update_table(self):
@@ -1342,48 +1757,125 @@ class FuturesOddsWindow(QMainWindow):
 
         try:
             odds_data = self.fetch_odds_data()
+            self._update_live_counts(odds_data)
+            odds_data = self._filter_by_live_toggle(odds_data)
             self.process_odds_data(odds_data)
             self.add_headers()
             for event in odds_data:
                 self.populate_table_rows(event)
             self.update_requests_remaining()
             self.table.resizeColumnsToContents()
+            try:
+                self.last_refresh_label.setText(f"Last refresh: {datetime.now().strftime('%I:%M:%S %p')}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"Error updating table: {e}")
+            try:
+                self.last_refresh_label.setText("Last refresh: error")
+            except Exception:
+                pass
 
     def fetch_odds_data(self):
         response = odds_api.get_odds(
             sport=self.current_sport,
             markets="outrights",
-            odds_format=ODDS_FORMAT,
+            odds_format=self._api_odds_format,
             bookmakers=','.join(self.display_sportsbooks)
         )
         print(response)
         return response
+
+    def _parse_commence_time(self, commence_time):
+        if not commence_time:
+            return None
+        try:
+            return datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _is_live_event(self, event):
+        dt = self._parse_commence_time(event.get('commence_time'))
+        if dt is None:
+            return False
+        try:
+            now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.utcnow()
+        except Exception:
+            now = datetime.utcnow()
+        return dt <= now
+
+    def _update_live_counts(self, odds_data):
+        try:
+            total_live = 0
+            total_pre = 0
+            for event in odds_data or []:
+                if self._is_live_event(event):
+                    total_live += 1
+                else:
+                    total_pre += 1
+            self.live_counts_label.setText(f"Pre-Game: {total_pre} | Live: {total_live}")
+        except Exception:
+            self.live_counts_label.setText("Pre-Game: -- | Live: --")
+
+    def _filter_by_live_toggle(self, odds_data):
+        try:
+            if self.live_button.isChecked():
+                return [e for e in odds_data or [] if self._is_live_event(e)]
+            return [e for e in odds_data or [] if not self._is_live_event(e)]
+        except Exception:
+            return odds_data
+
+    def _export_csv(self):
+        _export_table_to_csv(self, self.table, f"futures_odds_{self.current_sport}")
+
+    def _reset_filters(self):
+        try:
+            if self.selected_sports:
+                self.sport_dropdown.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.pregame_button.setChecked(True)
+        except Exception:
+            pass
+        try:
+            self._load_odds_format_pref()
+        except Exception:
+            pass
+        self.update_table()
 
     def process_odds_data(self, odds_data):
         for event in odds_data:
             for bookmaker in event['bookmakers']:
                 for market in bookmaker['markets']:
                     total_prob = sum(
-                        odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        odds_converter(self._api_odds_format, "probability", outcome["price"])
                         for outcome in market["outcomes"]
                     )
                     for outcome in market["outcomes"]:
-                        prob = odds_converter(ODDS_FORMAT, "probability", outcome["price"])
+                        prob = odds_converter(self._api_odds_format, "probability", outcome["price"])
                         no_vig_prob = prob / total_prob if total_prob > 0 else 0
-                        outcome["no_vig_price"] = odds_converter("probability", ODDS_FORMAT, no_vig_prob)
+                        outcome["no_vig_price"] = odds_converter("probability", self._api_odds_format, no_vig_prob)
 
     def add_headers(self):
-        headers = ["Team", "Best Sportsbook", "Positive Edge", "Kelly Bet"] + [
+        headers = ["Team", "Best\nBook", "Positive\nEdge", "Kelly\nBet"] + [
             self.sportsbook_mapping[bookmaker]
             for bookmaker in self.display_sportsbooks
-        ] + ["Consensus Odds"]
+        ] + ["Consensus\nOdds"]
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         try:
             header = self.table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.Stretch)
+            header.setSectionsMovable(False)
+            header.setSectionsClickable(False)
+            header.setHighlightSections(False)
+            header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.setFixedHeight(64)
+            hdr_font = header.font()
+            if hdr_font.pointSize() > 9:
+                hdr_font.setPointSize(hdr_font.pointSize() - 1)
+            header.setFont(hdr_font)
             for i in range(1, 4):
                 header.setSectionResizeMode(i, QHeaderView.Fixed)
             self.table.setColumnWidth(1, 160)
@@ -1415,10 +1907,11 @@ class FuturesOddsWindow(QMainWindow):
                     if market:
                         outcome_data = next((o for o in market['outcomes'] if o['name'] == outcome['name']), None)
                         if outcome_data:
-                            self.table.setItem(row, col, QTableWidgetItem(str(outcome_data["price"])))
+                            price_text = self._format_odds_value(outcome_data["price"])
+                            self.table.setItem(row, col, QTableWidgetItem(str(price_text)))
                             try:
                                 probabilities.append(
-                                    odds_converter(ODDS_FORMAT, "probability", outcome_data["no_vig_price"])
+                                    odds_converter(self._api_odds_format, "probability", outcome_data["no_vig_price"])
                                 )
                             except Exception:
                                 pass
@@ -1428,14 +1921,14 @@ class FuturesOddsWindow(QMainWindow):
 
             if probabilities:
                 consensus_probability = sum(p * w for p, w in zip(probabilities, weights)) / sum(weights)
-                consensus_odds = odds_converter("probability", ODDS_FORMAT, consensus_probability)
+                consensus_display = self._format_probability(consensus_probability)
 
                 best_sportsbook_col = 1
                 edge_col = 2
                 kelly_col = 3
                 consensus_col = len(self.display_sportsbooks) + 4
 
-                self.table.setItem(row, consensus_col, QTableWidgetItem(f"{consensus_odds:.2f}"))
+                self.table.setItem(row, consensus_col, QTableWidgetItem(consensus_display))
 
                 best_sportsbook = None
                 best_edge = -float('inf')
@@ -1449,10 +1942,10 @@ class FuturesOddsWindow(QMainWindow):
                     if user_market:
                         user_outcome = next((o for o in user_market["outcomes"] if o["name"] == outcome['name']), None)
                         if user_outcome:
-                            user_probability = odds_converter(ODDS_FORMAT, "probability", user_outcome["price"])
+                            user_probability = odds_converter(self._api_odds_format, "probability", user_outcome["price"])
                             edge = consensus_probability - user_probability
                             kelly = kelly_criterion(
-                                consensus_probability, odds_converter(ODDS_FORMAT, "decimal", user_outcome["price"])
+                                consensus_probability, odds_converter(self._api_odds_format, "decimal", user_outcome["price"])
                             )
 
                             if edge > best_edge:
@@ -1462,7 +1955,14 @@ class FuturesOddsWindow(QMainWindow):
 
                 self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
                 self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
-                self.table.setItem(row, kelly_col, QTableWidgetItem(f"{best_kelly:.2%}"))
+                kelly_amount_text = "N/A"
+                if best_sportsbook:
+                    try:
+                        bankroll = float(self.selected_accounts.get(best_sportsbook, 0))
+                        kelly_amount_text = f"${bankroll * best_kelly:,.2f}"
+                    except Exception:
+                        kelly_amount_text = "N/A"
+                self.table.setItem(row, kelly_col, QTableWidgetItem(kelly_amount_text))
                 # Conditional formatting for positive edge + best odds cell
                 try:
                     if best_edge > 0:
@@ -1500,6 +2000,94 @@ class FuturesOddsWindow(QMainWindow):
         except Exception as e:
             print(f"Error fetching requests remaining: {e}")
             self.requests_remaining_label.setText("Requests Remaining: Error")
+
+    def _update_sport_summary(self):
+        try:
+            total = len(self.selected_sports) if isinstance(self.selected_sports, list) else 0
+            if total <= 1:
+                summary = f"Sports: {self._display_sport_title(self.current_sport)}"
+            else:
+                summary = f"Sports: {self._display_sport_title(self.current_sport)} + {total - 1} more"
+            self.sport_summary_label.setText(summary)
+        except Exception:
+            self.sport_summary_label.setText("")
+
+    def _load_odds_format_pref(self):
+        try:
+            prefs = load_user_prefs()
+        except Exception:
+            prefs = {}
+        pref_fmt = None
+        if isinstance(prefs, dict):
+            pref_fmt = prefs.get('odds_format')
+        if pref_fmt not in ('american', 'decimal', 'probability'):
+            pref_fmt = ODDS_FORMAT if ODDS_FORMAT in ('american', 'decimal', 'probability') else 'american'
+        self._display_odds_format = pref_fmt
+        self._api_odds_format = pref_fmt if pref_fmt in ('american', 'decimal') else 'decimal'
+        if hasattr(self, 'odds_format_dropdown'):
+            try:
+                current_label = next(k for k, v in self._odds_format_map.items() if v == pref_fmt)
+                idx = self.odds_format_dropdown.findText(current_label)
+                if idx >= 0:
+                    self.odds_format_dropdown.setCurrentIndex(idx)
+            except Exception:
+                pass
+
+    def _on_odds_format_changed(self, label: str):
+        fmt = self._odds_format_map.get(label, 'american')
+        self._display_odds_format = fmt
+        self._api_odds_format = fmt if fmt in ('american', 'decimal') else 'decimal'
+        try:
+            prefs = load_user_prefs()
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs['odds_format'] = fmt
+            save_user_prefs(prefs)
+        except Exception:
+            pass
+        self.update_table()
+
+    def _format_odds_value(self, price):
+        if price is None:
+            return "N/A"
+        api_fmt = self._api_odds_format
+        disp_fmt = self._display_odds_format
+        try:
+            if disp_fmt == api_fmt:
+                if disp_fmt == 'american':
+                    ival = int(round(float(price)))
+                    return f"{ival:+d}" if ival > 0 else f"{ival}"
+                if disp_fmt == 'decimal':
+                    return f"{float(price):.2f}"
+            prob = odds_converter(api_fmt, 'probability', price)
+            if disp_fmt == 'probability':
+                return f"{prob:.1%}"
+            converted = odds_converter('probability', disp_fmt, prob)
+            if disp_fmt == 'american':
+                ival = int(round(float(converted)))
+                return f"{ival:+d}" if ival > 0 else f"{ival}"
+            if disp_fmt == 'decimal':
+                return f"{float(converted):.2f}"
+            return str(converted)
+        except Exception:
+            return str(price)
+
+    def _format_probability(self, prob):
+        if prob is None:
+            return "N/A"
+        disp_fmt = self._display_odds_format
+        try:
+            if disp_fmt == 'probability':
+                return f"{prob:.1%}"
+            converted = odds_converter('probability', disp_fmt, prob)
+            if disp_fmt == 'american':
+                ival = int(round(float(converted)))
+                return f"{ival:+d}" if ival > 0 else f"{ival}"
+            if disp_fmt == 'decimal':
+                return f"{float(converted):.2f}"
+            return str(converted)
+        except Exception:
+            return "N/A"
 
     def go_back(self):
         self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)

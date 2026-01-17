@@ -302,6 +302,13 @@ def set_stylesheet(palette: dict[str: str]) -> str:
         color: rgba(255,255,255,0.75);
     }}
 
+    /* Filters container */
+    #filtersBox {{
+        background-color: rgba(0, 0, 0, 0.08);
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        border-radius: 8px;
+    }}
+
     /* Scrollbar styling */
     QScrollBar:vertical {{
         background: transparent;
@@ -462,7 +469,12 @@ def save_user_prefs(prefs: Dict, path: Optional[str] = None) -> bool:
         return False
 
 
-def compute_consensus_point(event: dict, market_type: str = 'spreads', pinnacle_weight: int = 10):
+def compute_consensus_point(
+    event: dict,
+    market_type: str = 'spreads',
+    pinnacle_weight: int = 10,
+    market_key: str | None = None,
+):
     """
     Compute a consensus point for an event.
 
@@ -480,50 +492,67 @@ def compute_consensus_point(event: dict, market_type: str = 'spreads', pinnacle_
         if not home or not away:
             return None, None
 
-        team_points = {home: [], away: []}
-        team_weights = {home: [], away: []}
+        abs_points = []
+        fav_votes = {home: 0, away: 0}
+        spreads_key = market_key or 'spreads'
 
         for bookmaker in event.get('bookmakers', []):
-            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == 'spreads'), None)
+            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == spreads_key), None)
             if not market:
                 continue
-            weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
             for outcome in market.get('outcomes', []):
-                if 'point' in outcome and outcome['point'] is not None:
-                    try:
-                        p = float(outcome['point'])
-                    except Exception:
-                        continue
+                if 'point' not in outcome or outcome['point'] is None:
+                    continue
+                try:
+                    p = float(outcome['point'])
+                except Exception:
+                    continue
+                normalized = round(p * 2) / 2.0
+                abs_points.append(abs(normalized))
+
+        if not abs_points:
+            return None, None
+
+        counts = {}
+        for p in abs_points:
+            counts[p] = counts.get(p, 0) + 1
+
+        max_count = max(counts.values())
+        mode_candidates = [p for p, c in counts.items() if c == max_count]
+        mode_point = min(mode_candidates)
+
+        for bookmaker in event.get('bookmakers', []):
+            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == spreads_key), None)
+            if not market:
+                continue
+            for outcome in market.get('outcomes', []):
+                if 'point' not in outcome or outcome['point'] is None:
+                    continue
+                try:
+                    p = float(outcome['point'])
+                except Exception:
+                    continue
+                normalized = round(p * 2) / 2.0
+                if abs(normalized) != mode_point:
+                    continue
+                if normalized < 0:
                     name = outcome.get('name', '')
                     if name == home or home in name:
-                        team_points[home].append(p)
-                        team_weights[home].append(weight)
+                        fav_votes[home] += 1
                     elif name == away or away in name:
-                        team_points[away].append(p)
-                        team_weights[away].append(weight)
+                        fav_votes[away] += 1
 
-        avg_home = None
-        avg_away = None
-        if team_weights[home] and sum(team_weights[home]) > 0:
-            avg_home = sum(p * w for p, w in zip(team_points[home], team_weights[home])) / sum(team_weights[home])
-        if team_weights[away] and sum(team_weights[away]) > 0:
-            avg_away = sum(p * w for p, w in zip(team_points[away], team_weights[away])) / sum(team_weights[away])
-
-        consensus_point = None
         favorite = None
-        if avg_home is not None:
-            consensus_point = avg_home
-        elif avg_away is not None:
-            consensus_point = -avg_away
+        if fav_votes[home] > fav_votes[away]:
+            favorite = home
+        elif fav_votes[away] > fav_votes[home]:
+            favorite = away
 
-        if consensus_point is not None:
-            target_point = round(consensus_point * 2) / 2.0
-            if target_point < 0:
-                favorite = home
-            elif target_point > 0:
-                favorite = away
-            return target_point, favorite
-        return None, None
+        if favorite == home:
+            return -mode_point, favorite
+        if favorite == away:
+            return mode_point, favorite
+        return mode_point, None
 
     if market_type == 'totals':
         pts = []
