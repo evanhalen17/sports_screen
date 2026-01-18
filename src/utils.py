@@ -555,10 +555,10 @@ def compute_consensus_point(
         return mode_point, None
 
     if market_type == 'totals':
-        pts = []
-        wts = []
+        totals_key = market_key or 'totals'
+        counts: dict[float, int] = {}
         for bookmaker in event.get('bookmakers', []):
-            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == 'totals'), None)
+            market = next((m for m in bookmaker.get('markets', []) if m.get('key') == totals_key), None)
             if not market:
                 continue
             weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
@@ -568,12 +568,13 @@ def compute_consensus_point(
                         p = abs(float(outcome['point']))
                     except Exception:
                         continue
-                    pts.append(p)
-                    wts.append(weight)
+                    p = round(p * 2) / 2.0
+                    counts[p] = counts.get(p, 0) + weight
 
-        if pts and wts and sum(wts) > 0:
-            weighted_avg = sum(p * w for p, w in zip(pts, wts)) / sum(wts)
-            target_point = round(weighted_avg * 2) / 2.0
+        if counts:
+            max_count = max(counts.values())
+            mode_candidates = [p for p, c in counts.items() if c == max_count]
+            target_point = min(mode_candidates)
             return target_point, None
 
     return None, None
