@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QLabel, QScrollArea, QTableWidget, QTableWidgetItem,
     QHeaderView, QHBoxLayout, QGridLayout, QCheckBox, QComboBox,
     QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox,
-    QLineEdit, QButtonGroup, QStyledItemDelegate, QStyle, QFileDialog, QStyleOptionViewItem
+    QLineEdit, QButtonGroup, QStyledItemDelegate, QStyle, QFileDialog, QStyleOptionViewItem,
+    QSlider
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize, QModelIndex
 from PyQt6.QtGui import QColor, QBrush, QFontMetrics, QPalette, QPainter
@@ -63,6 +64,13 @@ def _export_table_to_csv(parent: QWidget, table: QTableWidget, default_prefix: s
                 writer.writerow(row_values)
     except Exception as exc:
         print(f"Export failed: {exc}")
+
+
+def _default_sportsbook_weights(sportsbook_mapping: Dict[str, str]) -> Dict[str, float]:
+    weights: Dict[str, float] = {}
+    for key in sportsbook_mapping.keys():
+        weights[key] = 1.0 if key == "pinnacle" else 0.6
+    return weights
 
 
 class EventDetailsDialog(QDialog):
@@ -132,6 +140,7 @@ class StartupWindow(QMainWindow):
         self.user_sportsbook_window = None
         self.sport_selection_window = None
         self.current_odds_window = None
+        self.futures_odds_window = None
         self.historical_analysis_window = None
 
         # Central widget and layout
@@ -148,13 +157,17 @@ class StartupWindow(QMainWindow):
         self.user_sportsbooks_button.clicked.connect(self.open_user_sportsbook_selection)
         main_layout.addWidget(self.user_sportsbooks_button)
 
-        self.current_odds_button = QPushButton("Monitor Current Odds", self)
-        self.current_odds_button.clicked.connect(self.open_current_odds)
-        main_layout.addWidget(self.current_odds_button)
+        self.matchup_odds_button = QPushButton("View Matchup Odds", self)
+        self.matchup_odds_button.clicked.connect(self.open_matchup_odds)
+        main_layout.addWidget(self.matchup_odds_button)
+
+        self.futures_odds_button = QPushButton("View Futures Odds", self)
+        self.futures_odds_button.clicked.connect(self.open_futures_odds)
+        main_layout.addWidget(self.futures_odds_button)
 
         # Quick Start: jump straight into Current Odds with saved or sensible defaults
         self.quick_start_button = QPushButton("Quick Start", self)
-        self.quick_start_button.setToolTip("Open Current Odds using saved preferences or popular sportsbooks")
+        self.quick_start_button.setToolTip("Open Matchup Odds using saved preferences or popular sportsbooks")
         self.quick_start_button.clicked.connect(self.quick_start)
         main_layout.addWidget(self.quick_start_button)
 
@@ -187,13 +200,48 @@ class StartupWindow(QMainWindow):
         print("User Sportsbook Accounts Saved:", self.selected_accounts)
         print("Display Sportsbooks Selected:", self.display_sportsbooks)
 
-    def open_current_odds(self):
-        if not self.selected_accounts:
-            print("Error: User sportsbooks must be set up before viewing current odds.")
-            return
+    def _load_sportsbook_prefs(self):
+        try:
+            prefs = load_user_prefs()
+        except Exception:
+            prefs = {}
+        selected_accounts = self.selected_accounts if self.selected_accounts else prefs.get('selected_accounts', {})
+        display_sportsbooks = self.display_sportsbooks if self.display_sportsbooks else prefs.get('display_sportsbooks', [])
+        if not display_sportsbooks:
+            display_sportsbooks = ['draftkings', 'fanduel', 'betmgm', 'pinnacle', 'betrivers']
+        return selected_accounts, display_sportsbooks
 
-        self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
-        self.sport_selection_window.show()
+    def _fetch_sports(self):
+        try:
+            return _require_odds_api().get_sports() or []
+        except Exception as e:
+            print(f"Error fetching sports: {e}")
+            return []
+
+    def open_matchup_odds(self):
+        selected_accounts, display_sportsbooks = self._load_sportsbook_prefs()
+        sports = self._fetch_sports()
+        matchup_sports = [s.get('key') for s in sports if s.get('key') and not s.get('has_outrights')]
+        if not matchup_sports:
+            print("Error: No matchup sports available.")
+            return
+        self.current_odds_window = CurrentOddsWindow(
+            matchup_sports, selected_accounts, self.sportsbook_mapping, display_sportsbooks
+        )
+        self.current_odds_window.show()
+        self.close()
+
+    def open_futures_odds(self):
+        selected_accounts, display_sportsbooks = self._load_sportsbook_prefs()
+        sports = self._fetch_sports()
+        futures_sports = [s.get('key') for s in sports if s.get('key') and s.get('has_outrights')]
+        if not futures_sports:
+            print("Error: No futures sports available.")
+            return
+        self.futures_odds_window = FuturesOddsWindow(
+            futures_sports, selected_accounts, self.sportsbook_mapping, display_sportsbooks
+        )
+        self.futures_odds_window.show()
         self.close()
 
     def open_historical_analysis(self):
@@ -202,56 +250,8 @@ class StartupWindow(QMainWindow):
         self.close()
 
     def quick_start(self):
-        """Open CurrentOddsWindow using saved prefs or sensible defaults."""
-        try:
-            prefs = load_user_prefs()
-        except Exception:
-            prefs = {}
-
-        selected_accounts = prefs.get('selected_accounts', {}) if isinstance(prefs, dict) else {}
-        display_sportsbooks = prefs.get('display_sportsbooks', []) if isinstance(prefs, dict) else []
-
-        # sensible defaults if nothing saved
-        if not display_sportsbooks:
-            display_sportsbooks = ['draftkings', 'fanduel', 'betmgm', 'pinnacle', 'betrivers']
-
-        # choose a default sport (first non-futures if possible)
-        try:
-            sports = _require_odds_api().get_sports() or []
-            default_sport = None
-            last_sport = prefs.get('last_sport') if isinstance(prefs, dict) else None
-            if last_sport:
-                last_match = next(
-                    (s for s in sports if s.get('key') == last_sport and not s.get('has_outrights')),
-                    None
-                )
-                if last_match:
-                    default_sport = last_match['key']
-            if default_sport is None:
-                for s in sports:
-                    if not s.get('has_outrights'):
-                        default_sport = s['key']
-                        break
-            if default_sport is None and sports:
-                default_sport = sports[0]['key']
-        except Exception:
-            default_sport = None
-
-        if default_sport:
-            self.current_odds_window = CurrentOddsWindow([default_sport], selected_accounts, self.sportsbook_mapping, display_sportsbooks)
-            self.current_odds_window.show()
-            # persist last chosen sport/market for future quick starts
-            try:
-                if not isinstance(prefs, dict):
-                    prefs = {}
-                prefs['last_sport'] = default_sport
-                prefs['display_sportsbooks'] = display_sportsbooks
-                save_user_prefs(prefs)
-            except Exception:
-                pass
-            self.close()
-        else:
-            print("Quick Start failed: could not determine a default sport.")
+        """Open Matchup Odds using saved prefs or sensible defaults."""
+        self.open_matchup_odds()
 
     def change_theme(self, theme_name: str):
         """Apply a new theme and persist the choice."""
@@ -278,6 +278,8 @@ class UserSportsbookSelectionWindow(QMainWindow):
         self.sportsbook_mapping = sportsbook_mapping
         self.selected_accounts = {}
         self.display_sportsbooks = []
+        self.sportsbook_weights = {}
+        self._default_weights = _default_sportsbook_weights(self.sportsbook_mapping)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -286,6 +288,9 @@ class UserSportsbookSelectionWindow(QMainWindow):
 
         self.label = QLabel("Select your sportsbooks and enter bankrolls (leave $0 for display-only):", self)
         main_layout.addWidget(self.label)
+        self.weight_hint = QLabel("Sharpness weights influence consensus odds (0.00 to 1.00). Default favors Pinnacle.", self)
+        self.weight_hint.setStyleSheet("font-size:11px;color:gray;")
+        main_layout.addWidget(self.weight_hint)
 
         self.scroll_area = QScrollArea(self)
         self.scroll_area_widget = QWidget()
@@ -294,13 +299,21 @@ class UserSportsbookSelectionWindow(QMainWindow):
         self.scroll_area_layout.setVerticalSpacing(10)
         self.scroll_area_layout.setColumnStretch(0, 1)
         self.scroll_area_layout.setColumnStretch(1, 0)
+        self.scroll_area_layout.setColumnStretch(2, 1)
+        self.scroll_area_layout.setColumnStretch(3, 0)
 
         header_name = QLabel("Sportsbook", self)
         header_bankroll = QLabel("Bankroll", self)
+        header_weight = QLabel("Sharpness", self)
+        header_weight_value = QLabel("Value", self)
         header_name.setStyleSheet("font-weight: 700;")
         header_bankroll.setStyleSheet("font-weight: 700;")
+        header_weight.setStyleSheet("font-weight: 700;")
+        header_weight_value.setStyleSheet("font-weight: 700;")
         self.scroll_area_layout.addWidget(header_name, 0, 0)
         self.scroll_area_layout.addWidget(header_bankroll, 0, 1)
+        self.scroll_area_layout.addWidget(header_weight, 0, 2)
+        self.scroll_area_layout.addWidget(header_weight_value, 0, 3)
 
         self.sportsbook_widgets = {}
         for row_idx, (key, title) in enumerate(self.sportsbook_mapping.items(), start=1):
@@ -312,10 +325,26 @@ class UserSportsbookSelectionWindow(QMainWindow):
             bankroll_input.setMinimumWidth(120)
             bankroll_input.setMinimumHeight(30)
             bankroll_input.setToolTip("Enter $0 to show odds without tracking bankroll.")
+            weight_slider = QSlider(Qt.Orientation.Horizontal, self)
+            weight_slider.setRange(0, 100)
+            weight_slider.setSingleStep(5)
+            weight_slider.setPageStep(10)
+            weight_slider.setMinimumWidth(120)
+            weight_slider.setToolTip("Sharpness weight from 0.00 (low) to 1.00 (sharp).")
+            weight_value = QLabel("0.00", self)
+            weight_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            default_weight = float(self._default_weights.get(key, 0.6))
+            weight_slider.setValue(int(round(default_weight * 100)))
+            weight_value.setText(f"{default_weight:.2f}")
+            def _update_weight_label(val: int, label: QLabel = weight_value) -> None:
+                label.setText(f"{val / 100:.2f}")
+            weight_slider.valueChanged.connect(_update_weight_label)
 
-            self.sportsbook_widgets[key] = (checkbox, bankroll_input)
+            self.sportsbook_widgets[key] = (checkbox, bankroll_input, weight_slider, weight_value)
             self.scroll_area_layout.addWidget(checkbox, row_idx, 0)
             self.scroll_area_layout.addWidget(bankroll_input, row_idx, 1)
+            self.scroll_area_layout.addWidget(weight_slider, row_idx, 2)
+            self.scroll_area_layout.addWidget(weight_value, row_idx, 3)
             self.scroll_area_layout.setRowMinimumHeight(row_idx, 34)
 
         self.scroll_area.setWidget(self.scroll_area_widget)
@@ -327,7 +356,8 @@ class UserSportsbookSelectionWindow(QMainWindow):
             prefs = load_user_prefs()
             saved_accounts = prefs.get('selected_accounts', {}) if isinstance(prefs, dict) else {}
             saved_display = prefs.get('display_sportsbooks', []) if isinstance(prefs, dict) else []
-            for key, (checkbox, bankroll_input) in self.sportsbook_widgets.items():
+            saved_weights = prefs.get('sportsbook_weights', {}) if isinstance(prefs, dict) else {}
+            for key, (checkbox, bankroll_input, weight_slider, _weight_value) in self.sportsbook_widgets.items():
                 if key in saved_display:
                     checkbox.setChecked(True)
                 if key in saved_accounts:
@@ -335,6 +365,13 @@ class UserSportsbookSelectionWindow(QMainWindow):
                         bankroll_input.setValue(float(saved_accounts.get(key, 0)))
                     except Exception:
                         pass
+                try:
+                    if key in saved_weights:
+                        weight_slider.setValue(int(round(float(saved_weights.get(key, self._default_weights.get(key, 0.6))) * 100)))
+                    else:
+                        weight_slider.setValue(int(round(float(self._default_weights.get(key, 0.6)) * 100)))
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -370,13 +407,18 @@ class UserSportsbookSelectionWindow(QMainWindow):
     def select_popular(self):
         """Check a small preset list of popular sportsbooks and assign light default bankrolls."""
         popular = ['draftkings', 'fanduel', 'betmgm', 'pinnacle', 'betrivers']
-        for key, (checkbox, bankroll_input) in self.sportsbook_widgets.items():
+        for key, (checkbox, bankroll_input, weight_slider, _weight_value) in self.sportsbook_widgets.items():
             if key in popular:
                 checkbox.setChecked(True)
                 # set a small default bankroll if currently zero
                 try:
                     if bankroll_input.value() == 0:
                         bankroll_input.setValue(100.0)
+                except Exception:
+                    pass
+                try:
+                    if weight_slider.value() == 0:
+                        weight_slider.setValue(int(round(float(self._default_weights.get(key, 0.6)) * 100)))
                 except Exception:
                     pass
 
@@ -390,6 +432,10 @@ class UserSportsbookSelectionWindow(QMainWindow):
             key for key, widget in self.sportsbook_widgets.items()
             if widget[0].isChecked()
         ]
+        self.sportsbook_weights = {
+            key: float(widget[2].value()) / 100.0
+            for key, widget in self.sportsbook_widgets.items()
+        }
         print("Saved Accounts:", self.selected_accounts)
         print("Display Sportsbooks:", self.display_sportsbooks)
         # Persist preferences for next session
@@ -399,6 +445,7 @@ class UserSportsbookSelectionWindow(QMainWindow):
                 prefs = {}
             prefs['selected_accounts'] = self.selected_accounts
             prefs['display_sportsbooks'] = self.display_sportsbooks
+            prefs['sportsbook_weights'] = self.sportsbook_weights
             save_user_prefs(prefs)
         except Exception:
             pass
@@ -566,6 +613,7 @@ class OddsWindowMixin:
     odds_format_dropdown: QComboBox
     _display_odds_format: str
     _api_odds_format: str
+    _sportsbook_weights: Dict[str, float]
     table: QTableWidget
     def update_table(self) -> None:
         raise NotImplementedError
@@ -667,6 +715,21 @@ class OddsWindowMixin:
             except Exception:
                 pass
 
+    def _load_sportsbook_weights(self):
+        weights = _default_sportsbook_weights(self.sportsbook_mapping)
+        try:
+            prefs = load_user_prefs()
+            saved = prefs.get('sportsbook_weights') if isinstance(prefs, dict) else None
+            if isinstance(saved, dict):
+                for key, value in saved.items():
+                    try:
+                        weights[key] = float(value)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._sportsbook_weights = weights
+
     def _on_odds_format_changed(self, label: str):
         fmt = self._odds_format_map.get(label, 'american')
         self._display_odds_format = fmt
@@ -742,6 +805,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self._display_odds_format = ODDS_FORMAT
         self._api_odds_format = ODDS_FORMAT if ODDS_FORMAT in ("american", "decimal") else "decimal"
         self._sport_title_map = self._build_sport_title_map()
+        self._load_sportsbook_weights()
         self._event_ids_map = {}
         self._event_row_groups = []
         self._row_event_map = []
@@ -763,9 +827,6 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         filters_title = QLabel("Filters", self)
         filters_title.setStyleSheet("font-weight:700;")
         filters_layout.addWidget(filters_title)
-        self.sport_summary_label = QLabel("", self)
-        self.sport_summary_label.setStyleSheet("font-size:11px;color:gray;")
-        filters_layout.addWidget(self.sport_summary_label)
         self.sport_summary_label = QLabel("", self)
         self.sport_summary_label.setStyleSheet("font-size:11px;color:gray;")
         filters_layout.addWidget(self.sport_summary_label)
@@ -923,18 +984,26 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             pass
 
         # Legend explaining icons and consensus
-        self.legend_label = QLabel("Legend: Consensus = weighted odds (Pinnacle-weighted).", self)
+        self.legend_label = QLabel("Legend: Consensus = weighted odds (user-defined sharpness).", self)
         self.legend_label.setStyleSheet("font-size:11px;color:gray;")
         main_layout.addWidget(self.legend_label)
 
         button_layout = QHBoxLayout()
-        self.back_button = QPushButton("Back to Sport Selection", self)
+        self.back_button = QPushButton("Back to Home", self)
         self.back_button.clicked.connect(self.go_back)
         button_layout.addWidget(self.back_button)
 
         main_layout.addLayout(button_layout)
 
         self.update_requests_remaining()
+
+        # start background fetch of event ids for all matchup sports
+        try:
+            self._event_ids_worker = EventIdsWorker(_require_odds_api(), self.selected_sports)
+            self._event_ids_worker.finished.connect(self.set_event_ids_map)
+            self._event_ids_worker.start()
+        except Exception as e:
+            print(f"Failed to start event id worker: {e}")
 
     def _on_sport_changed(self, idx: int):
         sport_key = self.sport_dropdown.itemData(idx) or self.sport_dropdown.currentText()
@@ -966,10 +1035,8 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             self.event_ids_status_label.setText("Event IDs: Error")
 
     def go_back(self):
-        self.sport_selection_window = SportSelectionWindow(
-            self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks
-        )
-        self.sport_selection_window.show()
+        self.startup_window = StartupWindow()
+        self.startup_window.show()
         self.close()
 
     def update_table(self):
@@ -1014,7 +1081,12 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                                 )
                                 if isinstance(ev_odds, list) and len(ev_odds) > 0:
                                     ev = ev_odds[0]
-                                    cp, _ = compute_consensus_point(ev, 'totals', market_key='alternate_totals')
+                                    cp, _ = compute_consensus_point(
+                                        ev,
+                                        'totals',
+                                        sportsbook_weights=self._sportsbook_weights,
+                                        market_key='alternate_totals'
+                                    )
                                     if cp is not None:
                                         try:
                                             event['_consensus_point'] = cp
@@ -1045,7 +1117,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                     # fallback to base totals consensus if alternate totals didn't yield one
                     for event in odds_data:
                         if event.get('_consensus_point') is None:
-                            cp, _ = compute_consensus_point(event, 'totals')
+                            cp, _ = compute_consensus_point(event, 'totals', sportsbook_weights=self._sportsbook_weights)
                             if cp is not None:
                                 event['_consensus_point'] = cp
                 else:
@@ -1072,7 +1144,12 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                                 # ev_odds is expected to be a list with single event dict
                                 if isinstance(ev_odds, list) and len(ev_odds) > 0:
                                     ev = ev_odds[0]
-                                    cp, fav = compute_consensus_point(ev, 'spreads', market_key='alternate_spreads')
+                                    cp, fav = compute_consensus_point(
+                                        ev,
+                                        'spreads',
+                                        sportsbook_weights=self._sportsbook_weights,
+                                        market_key='alternate_spreads'
+                                    )
                                     if cp is not None:
                                         try:
                                             event['_consensus_point'] = cp
@@ -1263,7 +1340,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             consensus_col_idx = len(self.display_sportsbooks) + 7
             item = self.table.horizontalHeaderItem(consensus_col_idx)
             if consensus_col_idx < self.table.columnCount() and item is not None:
-                item.setToolTip("Consensus Odds: Pinnacle-weighted consensus across selected sportsbooks (no-vig normalized)")
+                item.setToolTip("Consensus Odds: weighted consensus across selected sportsbooks (no-vig normalized)")
                 try:
                     hdr_font = item.font()
                     hdr_font.setBold(True)
@@ -1502,7 +1579,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                                 except Exception:
                                     pass
 
-                            weight = 10 if bookmaker_key == 'pinnacle' else 1
+                            weight = self._sportsbook_weights.get(bookmaker_key, 1.0)
                             weights.append(weight)
 
             # set Spread cell (compact) in column index 2 (Event, Outcome, Spread)
@@ -1625,6 +1702,7 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
         self._api_odds_format = ODDS_FORMAT if ODDS_FORMAT in ("american", "decimal") else "decimal"
         self._load_odds_format_pref()
         self._sport_title_map = self._build_sport_title_map()
+        self._load_sportsbook_weights()
         self.sport_selection_window = None
 
         # Filters bar
@@ -1637,6 +1715,9 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
         filters_title = QLabel("Filters", self)
         filters_title.setStyleSheet("font-weight:700;")
         filters_layout.addWidget(filters_title)
+        self.sport_summary_label = QLabel("", self)
+        self.sport_summary_label.setStyleSheet("font-size:11px;color:gray;")
+        filters_layout.addWidget(self.sport_summary_label)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -1727,7 +1808,7 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
         self.update_table()
 
         button_layout = QHBoxLayout()
-        self.back_button = QPushButton("Back to Sport Selection", self)
+        self.back_button = QPushButton("Back to Home", self)
         self.back_button.clicked.connect(self.go_back)
         button_layout.addWidget(self.back_button)
         main_layout.addLayout(button_layout)
@@ -1871,7 +1952,7 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
                             except Exception:
                                 pass
 
-                            weight = 10 if bookmaker_key == "pinnacle" else 1
+                            weight = self._sportsbook_weights.get(bookmaker_key, 1.0)
                             weights.append(weight)
 
             if probabilities:
@@ -1949,8 +2030,8 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
                 self.table.setItem(row, best_sportsbook_col, QTableWidgetItem("N/A"))
 
     def go_back(self):
-        self.sport_selection_window = SportSelectionWindow(self.sportsbook_mapping, self.selected_accounts, self.display_sportsbooks)
-        self.sport_selection_window.show()
+        self.startup_window = StartupWindow()
+        self.startup_window.show()
         self.close()
 
 

@@ -3,7 +3,7 @@
 import os
 import json
 import re
-from typing import Generator, Union, Optional, Dict, List
+from typing import Generator, Union, Optional, Dict, List, Callable, cast
 from datetime import datetime, timedelta, timezone
 import tempfile
 import time
@@ -81,8 +81,9 @@ except Exception:
 def _ensure_aware(dt: datetime) -> datetime:
     if dt.tzinfo is not None:
         return dt
-    if hasattr(_UTC_ZONE, "localize"):
-        return _UTC_ZONE.localize(dt)
+    localize = getattr(_UTC_ZONE, "localize", None)
+    if callable(localize):
+        return cast(Callable[[datetime], datetime], localize)(dt)
     return dt.replace(tzinfo=_UTC_ZONE)
 
 
@@ -199,7 +200,7 @@ def odds_converter(odds_from: str, odds_to: str, odds_value: float) -> float:
 def remove_none_values(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
-def set_stylesheet(palette: dict[str: str]) -> str:
+def set_stylesheet(palette: Dict[str, str]) -> str:
     """Return a modernized stylesheet string based on the provided palette.
 
     The stylesheet focuses on readable typography, comfortable spacing, and
@@ -473,7 +474,8 @@ def compute_consensus_point(
     event: dict,
     market_type: str = 'spreads',
     pinnacle_weight: int = 10,
-    market_key: str | None = None,
+    sportsbook_weights: Optional[Dict[str, float]] = None,
+    market_key: Optional[str] = None,
 ):
     """
     Compute a consensus point for an event.
@@ -556,12 +558,17 @@ def compute_consensus_point(
 
     if market_type == 'totals':
         totals_key = market_key or 'totals'
-        counts: dict[float, int] = {}
+        counts: Dict[float, int] = {}
         for bookmaker in event.get('bookmakers', []):
             market = next((m for m in bookmaker.get('markets', []) if m.get('key') == totals_key), None)
             if not market:
                 continue
             weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
+            if sportsbook_weights and isinstance(sportsbook_weights, dict):
+                try:
+                    weight = float(sportsbook_weights.get(bookmaker.get('key'), weight))
+                except Exception:
+                    pass
             for outcome in market.get('outcomes', []):
                 if 'point' in outcome and outcome['point'] is not None:
                     try:
