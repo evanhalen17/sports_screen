@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize, QModelIndex
 from PyQt6.QtGui import QColor, QBrush, QFontMetrics, QPalette, QPainter
 import sys
 import csv
+import time
 from datetime import datetime
 from typing import Dict, List, Optional
 from the_odds_api import OddsAPI
@@ -786,6 +787,85 @@ class OddsWindowMixin:
         except Exception:
             return "N/A"
 
+    def _set_last_refresh_label(self):
+        try:
+            refresh_str = datetime.now().strftime('%I:%M:%S %p')
+            snapshot_ts = getattr(self, "_last_odds_snapshot_ts", None)
+            cached = bool(getattr(self, "_last_odds_snapshot_cached", False))
+            if snapshot_ts:
+                snapshot_str = datetime.fromtimestamp(snapshot_ts).strftime('%I:%M:%S %p')
+            else:
+                snapshot_str = "Unknown"
+            status = "cached" if cached else "current"
+            self.last_refresh_label.setText(f"Last refresh: {refresh_str} | Odds snapshot: {snapshot_str} ({status})")
+        except Exception:
+            pass
+
+    def _select_consensus_outcome(self, market, outcome_name, market_key, consensus_point, favorite=None):
+        if not market or consensus_point is None:
+            return None
+        outcomes = market.get('outcomes', [])
+        if not outcomes:
+            return None
+        try:
+            cp = float(consensus_point)
+        except Exception:
+            return None
+
+        tol = 1e-6
+        if market_key == 'totals':
+            target_point = abs(cp)
+            name_lower = (outcome_name or '').lower()
+            target_side = None
+            if 'over' in name_lower:
+                target_side = 'over'
+            elif 'under' in name_lower:
+                target_side = 'under'
+
+            def matches_total(outcome):
+                try:
+                    pval = abs(float(outcome.get('point')))
+                except Exception:
+                    return False
+                return abs(pval - target_point) < tol
+
+            if target_side:
+                for outcome in outcomes:
+                    if target_side in str(outcome.get('name', '')).lower() and matches_total(outcome):
+                        return outcome
+            for outcome in outcomes:
+                if matches_total(outcome):
+                    return outcome
+            return None
+
+        if market_key == 'spreads':
+            target_abs = abs(cp)
+            expected_point = None
+            if favorite and outcome_name:
+                if outcome_name == favorite:
+                    expected_point = -target_abs
+                else:
+                    expected_point = target_abs
+
+            def matches_spread(outcome):
+                try:
+                    pval = float(outcome.get('point'))
+                except Exception:
+                    return False
+                if expected_point is not None:
+                    return abs(pval - expected_point) < tol
+                return abs(abs(pval) - target_abs) < tol
+
+            for outcome in outcomes:
+                if outcome_name and outcome_name in str(outcome.get('name', '')) and matches_spread(outcome):
+                    return outcome
+            for outcome in outcomes:
+                if matches_spread(outcome):
+                    return outcome
+            return None
+
+        return None
+
 
 class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
     def __init__(self, selected_sports, selected_accounts, sportsbook_mapping, display_sportsbooks):
@@ -810,6 +890,8 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self._event_row_groups = []
         self._row_event_map = []
         self._last_odds_data = None
+        self._odds_cache = {}
+        self._odds_cache_ttl = 12
         self.sport_selection_window = None
 
         self.central_widget = QWidget()
@@ -1046,7 +1128,6 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self.table.setRowCount(0)
         # clear cached row->event mapping
         self._row_event_map = []
-        self._last_odds_data = None
 
         try:
             odds_data = self.fetch_odds_data()
@@ -1055,131 +1136,22 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             # cache fetched data for detail views
             self._last_odds_data = odds_data
             # If market is spreads or totals, compute consensus point per event and try
-            # to fetch event-level odds for that exact point to make apples-to-apples comparisons.
+            # to use it for apples-to-apples comparisons.
             market_type = self._current_market_key()
             if market_type in ('spreads', 'totals') and isinstance(odds_data, list):
                 if market_type == 'totals':
-                    # totals: use alternate_totals from event odds to pick a mode point
-                    try:
-                        remaining = _require_odds_api().get_remaining_requests()
-                    except Exception:
-                        remaining = 0
-
-                    needed = len(odds_data or [])
-                    if needed > 0 and remaining >= needed:
-                        for event in odds_data:
-                            eid = event.get('id')
-                            if not eid:
-                                continue
-                            try:
-                                ev_odds = _require_odds_api().get_event_odds(
-                                    self.current_sport,
-                                    eid,
-                                    markets='alternate_totals',
-                                    odds_format=self._api_odds_format,
-                                    bookmakers=','.join(self.display_sportsbooks)
-                                )
-                                if isinstance(ev_odds, list) and len(ev_odds) > 0:
-                                    ev = ev_odds[0]
-                                    cp, _ = compute_consensus_point(
-                                        ev,
-                                        'totals',
-                                        sportsbook_weights=self._sportsbook_weights,
-                                        market_key='alternate_totals'
-                                    )
-                                    if cp is not None:
-                                        try:
-                                            event['_consensus_point'] = cp
-                                        except Exception:
-                                            pass
-                                    for b in ev.get('bookmakers', []):
-                                        orig_b = next((ob for ob in event.get('bookmakers', []) if ob.get('key') == b.get('key')), None)
-                                        if not orig_b:
-                                            continue
-                                        ev_market = next((m for m in b.get('markets', []) if m.get('key') == 'alternate_totals'), None)
-                                        if not ev_market:
-                                            ev_market = None
-                                        matched = []
-                                        if ev_market and cp is not None:
-                                            matched = [
-                                                o for o in ev_market.get('outcomes', [])
-                                                if 'point' in o and abs(float(o.get('point', 0)) - float(cp)) < 1e-6
-                                            ]
-                                        orig_market = next((m for m in orig_b.get('markets', []) if m.get('key') == 'totals'), None)
-                                        if orig_market is not None and matched:
-                                            orig_market['outcomes'] = matched
-                                            try:
-                                                event['_spread_method'] = 'alternate_totals'
-                                            except Exception:
-                                                pass
-                            except Exception as e:
-                                print(f"Failed to fetch event-level odds for {eid}: {e}")
-                    # fallback to base totals consensus if alternate totals didn't yield one
                     for event in odds_data:
-                        if event.get('_consensus_point') is None:
-                            cp, _ = compute_consensus_point(event, 'totals', sportsbook_weights=self._sportsbook_weights)
-                            if cp is not None:
-                                event['_consensus_point'] = cp
+                        cp, _ = compute_consensus_point(event, 'totals', sportsbook_weights=self._sportsbook_weights)
+                        if cp is not None:
+                            event['_consensus_point'] = cp
+                            event['_spread_method'] = 'consensus'
                 else:
-                    # spreads: use alternate_spreads from event odds to pick a mode point
-                    try:
-                        remaining = _require_odds_api().get_remaining_requests()
-                    except Exception:
-                        remaining = 0
-
-                    needed = len(odds_data or [])
-                    if needed > 0 and remaining >= needed:
-                        for event in odds_data:
-                            eid = event.get('id')
-                            if not eid:
-                                continue
-                            try:
-                                ev_odds = _require_odds_api().get_event_odds(
-                                    self.current_sport,
-                                    eid,
-                                    markets='alternate_spreads',
-                                    odds_format=self._api_odds_format,
-                                    bookmakers=','.join(self.display_sportsbooks)
-                                )
-                                # ev_odds is expected to be a list with single event dict
-                                if isinstance(ev_odds, list) and len(ev_odds) > 0:
-                                    ev = ev_odds[0]
-                                    cp, fav = compute_consensus_point(
-                                        ev,
-                                        'spreads',
-                                        sportsbook_weights=self._sportsbook_weights,
-                                        market_key='alternate_spreads'
-                                    )
-                                    if cp is not None:
-                                        try:
-                                            event['_consensus_point'] = cp
-                                            event['_consensus_favorite'] = fav
-                                        except Exception:
-                                            pass
-                                    for b in ev.get('bookmakers', []):
-                                        orig_b = next((ob for ob in event.get('bookmakers', []) if ob.get('key') == b.get('key')), None)
-                                        if not orig_b:
-                                            continue
-                                        ev_market = next((m for m in b.get('markets', []) if m.get('key') == 'alternate_spreads'), None)
-                                        if not ev_market:
-                                            ev_market = None
-                                        # Filter outcomes to those matching the absolute target point (both sides)
-                                        matched = []
-                                        if ev_market and cp is not None:
-                                            matched = [
-                                                o for o in ev_market.get('outcomes', [])
-                                                if 'point' in o and abs(abs(float(o.get('point', 0))) - abs(cp)) < 1e-6
-                                            ]
-                                        # replace original spreads outcomes with the exact-point ones (even if empty)
-                                        orig_market = next((m for m in orig_b.get('markets', []) if m.get('key') == 'spreads'), None)
-                                        if orig_market is not None:
-                                            orig_market['outcomes'] = matched
-                                            try:
-                                                event['_spread_method'] = 'alternate_spreads'
-                                            except Exception:
-                                                pass
-                            except Exception as e:
-                                print(f"Failed to fetch event-level odds for {eid}: {e}")
+                    for event in odds_data:
+                        cp, fav = compute_consensus_point(event, 'spreads', sportsbook_weights=self._sportsbook_weights)
+                        if cp is not None:
+                            event['_consensus_point'] = cp
+                            event['_consensus_favorite'] = fav
+                            event['_spread_method'] = 'consensus'
 
             self.process_odds_data(odds_data)
             self.add_headers()
@@ -1207,7 +1179,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
 
             self._apply_row_heights()
             try:
-                self.last_refresh_label.setText(f"Last refresh: {datetime.now().strftime('%I:%M:%S %p')}")
+                self._set_last_refresh_label()
             except Exception:
                 pass
 
@@ -1219,12 +1191,39 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                 pass
 
     def fetch_odds_data(self):
-        response = _require_odds_api().get_odds(
-            sport=self.current_sport,
-            markets=self._current_market_key(),
-            odds_format=self._api_odds_format,
-            bookmakers=','.join(self.display_sportsbooks)
-        )
+        market_key = self._current_market_key()
+        bookmakers = ','.join(self.display_sportsbooks)
+        cache_key = (self.current_sport, market_key, self._api_odds_format, bookmakers)
+        now = time.time()
+
+        cached = self._odds_cache.get(cache_key)
+        if cached and now - cached.get('ts', 0) < self._odds_cache_ttl:
+            self._last_odds_snapshot_ts = cached.get('ts')
+            self._last_odds_snapshot_cached = True
+            return cached.get('data')
+
+        try:
+            response = _require_odds_api().get_odds(
+                sport=self.current_sport,
+                markets=market_key,
+                odds_format=self._api_odds_format,
+                bookmakers=bookmakers
+            )
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg and cached:
+                self._last_odds_snapshot_ts = cached.get('ts')
+                self._last_odds_snapshot_cached = True
+                return cached.get('data')
+            if "429" in msg and self._last_odds_data is not None:
+                self._last_odds_snapshot_ts = getattr(self, "_last_odds_snapshot_ts", None)
+                self._last_odds_snapshot_cached = True
+                return self._last_odds_data
+            raise
+
+        self._odds_cache[cache_key] = {"ts": now, "data": response}
+        self._last_odds_snapshot_ts = now
+        self._last_odds_snapshot_cached = False
         print(response)
         return response
 
@@ -1517,21 +1516,31 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                 if bookmaker:
                     market = next((m for m in bookmaker.get('markets', []) if m.get('key') == market_key), None)
                     if market:
-                        # Try to match by exact name first
-                        outcome_data = next((o for o in market.get('outcomes', []) if o.get('name') == outcome_name), None)
+                        outcome_data = None
+                        consensus_point = event.get('_consensus_point') if market_key in ('spreads', 'totals') else None
+                        consensus_favorite = event.get('_consensus_favorite')
+                        if market_key in ('spreads', 'totals') and consensus_point is not None:
+                            outcome_data = self._select_consensus_outcome(
+                                market,
+                                outcome_name,
+                                market_key,
+                                consensus_point,
+                                consensus_favorite
+                            )
+                        else:
+                            # Try to match by exact name first
+                            outcome_data = next((o for o in market.get('outcomes', []) if o.get('name') == outcome_name), None)
 
-                        # If not found and this is spreads, try to match by team substring
-                        if outcome_data is None and market_key == 'spreads':
-                            outcome_data = next((o for o in market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
+                            # If not found and this is spreads, try to match by team substring
+                            if outcome_data is None and market_key == 'spreads':
+                                outcome_data = next((o for o in market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
 
-                        # If still not found, as a fallback normalize points to nearest 0.5 and pick closest
-                        if outcome_data is None and market_key == 'spreads':
-                            # attempt to find outcome with nearest point to consensus if available
-                            pts = [o for o in market.get('outcomes', []) if 'point' in o and o.get('point') is not None]
-                            if pts:
-                                # choose one with smallest absolute point difference to 0 (prefer favorites/underdogs by name presence)
-                                outcome_data = pts[0]
-                                method_used = 'normalized'
+                            # If still not found, as a fallback normalize points to nearest 0.5 and pick closest
+                            if outcome_data is None and market_key == 'spreads':
+                                pts = [o for o in market.get('outcomes', []) if 'point' in o and o.get('point') is not None]
+                                if pts:
+                                    outcome_data = pts[0]
+                                    method_used = 'normalized'
 
                         if outcome_data:
                             price_display = outcome_data.get('price')
@@ -1612,10 +1621,21 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                         None
                     )
                     if user_market:
-                        # match user outcome similarly by team
-                        user_outcome = next((o for o in user_market.get('outcomes', []) if o.get('name') == outcome_name), None)
-                        if user_outcome is None and market_key == 'spreads':
-                            user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
+                        consensus_point = event.get('_consensus_point') if market_key in ('spreads', 'totals') else None
+                        consensus_favorite = event.get('_consensus_favorite')
+                        if market_key in ('spreads', 'totals') and consensus_point is not None:
+                            user_outcome = self._select_consensus_outcome(
+                                user_market,
+                                outcome_name,
+                                market_key,
+                                consensus_point,
+                                consensus_favorite
+                            )
+                        else:
+                            # match user outcome similarly by team
+                            user_outcome = next((o for o in user_market.get('outcomes', []) if o.get('name') == outcome_name), None)
+                            if user_outcome is None and market_key == 'spreads':
+                                user_outcome = next((o for o in user_market.get('outcomes', []) if outcome_name in o.get('name', '')), None)
                         if user_outcome:
                             try:
                                 user_probability = odds_converter(self._api_odds_format, 'probability', user_outcome.get('price'))
@@ -1703,6 +1723,8 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
         self._load_odds_format_pref()
         self._sport_title_map = self._build_sport_title_map()
         self._load_sportsbook_weights()
+        self._odds_cache = {}
+        self._odds_cache_ttl = 12
         self.sport_selection_window = None
 
         # Filters bar
@@ -1839,7 +1861,7 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
             self.update_requests_remaining()
             self.table.resizeColumnsToContents()
             try:
-                self.last_refresh_label.setText(f"Last refresh: {datetime.now().strftime('%I:%M:%S %p')}")
+                self._set_last_refresh_label()
             except Exception:
                 pass
         except Exception as e:
@@ -1850,12 +1872,35 @@ class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
                 pass
 
     def fetch_odds_data(self):
-        response = _require_odds_api().get_odds(
-            sport=self.current_sport,
-            markets="outrights",
-            odds_format=self._api_odds_format,
-            bookmakers=','.join(self.display_sportsbooks)
-        )
+        market_key = "outrights"
+        bookmakers = ','.join(self.display_sportsbooks)
+        cache_key = (self.current_sport, market_key, self._api_odds_format, bookmakers)
+        now = time.time()
+
+        cached = self._odds_cache.get(cache_key)
+        if cached and now - cached.get('ts', 0) < self._odds_cache_ttl:
+            self._last_odds_snapshot_ts = cached.get('ts')
+            self._last_odds_snapshot_cached = True
+            return cached.get('data')
+
+        try:
+            response = _require_odds_api().get_odds(
+                sport=self.current_sport,
+                markets=market_key,
+                odds_format=self._api_odds_format,
+                bookmakers=bookmakers
+            )
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg and cached:
+                self._last_odds_snapshot_ts = cached.get('ts')
+                self._last_odds_snapshot_cached = True
+                return cached.get('data')
+            raise
+
+        self._odds_cache[cache_key] = {"ts": now, "data": response}
+        self._last_odds_snapshot_ts = now
+        self._last_odds_snapshot_cached = False
         print(response)
         return response
 
