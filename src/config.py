@@ -19,24 +19,24 @@ ODDS_FORMAT = 'american'
 
 PALETTES = {
     'dark': {
-        'background-dark': '#212121',
-        'table-hdr-dark': '#27374d',
-        'combobox-hover': '#0f4c75',
-        'table-row-alt1': '#222831',
-        'table-row-alt2': '#393e46',
-        'table-row-hover': '#6096b4',
-        'text-light': '#eeeeee',
-        'text-dark': '#000000'
+        'background-dark': '#0F172A',
+        'table-hdr-dark': '#1E293B',
+        'combobox-hover': '#1D4ED8',
+        'table-row-alt1': '#111827',
+        'table-row-alt2': '#1F2937',
+        'table-row-hover': '#2563EB',
+        'text-light': '#E5E7EB',
+        'text-dark': '#0B1220'
     },
     'light': {
-        'background-dark': '#F9F7F7',
-        'table-hdr-dark': '#B1B2FF',
-        'combobox-hover': '#AAC4FF',
-        'table-row-alt1': '#D2DAFF',
-        'table-row-alt2': '#EEF1FF',
-        'table-row-hover': '#A6B1E1',
-        'text-light': '#000000',
-        'text-dark': '#222831'
+        'background-dark': '#F8FAFC',
+        'table-hdr-dark': '#E2E8F0',
+        'combobox-hover': '#93C5FD',
+        'table-row-alt1': '#F1F5F9',
+        'table-row-alt2': '#E2E8F0',
+        'table-row-hover': '#BFDBFE',
+        'text-light': '#0F172A',
+        'text-dark': '#1E293B'
     }
 }
 
