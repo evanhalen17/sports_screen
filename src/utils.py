@@ -485,6 +485,9 @@ def compute_consensus_point(
 
     Returns (consensus_point: float|None, favorite: str|None)
     """
+    def _normalize_name(value: Optional[str]) -> str:
+        return re.sub(r'[^a-z0-9]+', '', str(value or '').lower())
+
     if not isinstance(event, dict):
         return None, None
 
@@ -493,6 +496,8 @@ def compute_consensus_point(
         away = event.get('away_team')
         if not home or not away:
             return None, None
+        home_norm = _normalize_name(home)
+        away_norm = _normalize_name(away)
 
         abs_points = []
         fav_votes = {home: 0, away: 0}
@@ -538,10 +543,10 @@ def compute_consensus_point(
                 if abs(normalized) != mode_point:
                     continue
                 if normalized < 0:
-                    name = outcome.get('name', '')
-                    if name == home or home in name:
+                    name_norm = _normalize_name(outcome.get('name', ''))
+                    if home_norm and (home_norm in name_norm or name_norm in home_norm):
                         fav_votes[home] += 1
-                    elif name == away or away in name:
+                    elif away_norm and (away_norm in name_norm or name_norm in away_norm):
                         fav_votes[away] += 1
 
         favorite = None
@@ -563,12 +568,6 @@ def compute_consensus_point(
             market = next((m for m in bookmaker.get('markets', []) if m.get('key') == totals_key), None)
             if not market:
                 continue
-            weight = pinnacle_weight if bookmaker.get('key') == 'pinnacle' else 1
-            if sportsbook_weights and isinstance(sportsbook_weights, dict):
-                try:
-                    weight = float(sportsbook_weights.get(bookmaker.get('key'), weight))
-                except Exception:
-                    pass
             for outcome in market.get('outcomes', []):
                 if 'point' in outcome and outcome['point'] is not None:
                     try:
@@ -576,7 +575,7 @@ def compute_consensus_point(
                     except Exception:
                         continue
                     p = round(p * 2) / 2.0
-                    counts[p] = counts.get(p, 0) + weight
+                    counts[p] = counts.get(p, 0) + 1
 
         if counts:
             max_count = max(counts.values())
