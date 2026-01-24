@@ -70,6 +70,9 @@ sports_screen/
      THEODDSAPI_KEY_PROD=your_production_key
      ```
 
+5. **Create user preferences file**
+   - Copy `data/user_prefs.example.json` to `data/user_prefs.json`
+
 ## Usage
 
 Run the application from the project root:

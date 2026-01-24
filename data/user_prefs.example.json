@@ -1,0 +1,53 @@
+{
+  "selected_accounts": {
+    "betmgm": 0.0,
+    "betrivers": 0.0,
+    "williamhill_us": 0.0,
+    "draftkings": 0.0,
+    "fanduel": 0.0,
+    "ballybet": 0.0,
+    "espnbet": 0.0
+  },
+  "display_sportsbooks": [
+    "betonlineag",
+    "betmgm",
+    "betrivers",
+    "betus",
+    "bovada",
+    "williamhill_us",
+    "draftkings",
+    "fanatics",
+    "fanduel",
+    "kalshi",
+    "lowvig",
+    "mybookieag",
+    "ballybet",
+    "espnbet",
+    "pointsbet",
+    "pinnacle",
+    "prophetx"
+  ],
+  "enable_requery": false,
+  "last_sport": "basketball_ncaab",
+  "odds_format": "american",
+  "sportsbook_weights": {
+    "betonlineag": 0.5,
+    "betmgm": 0.5,
+    "betrivers": 0.5,
+    "betus": 0.5,
+    "bovada": 0.5,
+    "williamhill_us": 0.5,
+    "draftkings": 0.7,
+    "fanatics": 0.5,
+    "fanduel": 0.7,
+    "kalshi": 0.6,
+    "lowvig": 0.7,
+    "mybookieag": 0.5,
+    "ballybet": 0.5,
+    "espnbet": 0.5,
+    "pointsbet": 0.5,
+    "pinnacle": 1.0,
+    "prophetx": 0.6
+  },
+  "theme": "dark"
+}

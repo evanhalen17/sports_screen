@@ -1,6 +1,7 @@
 env/
 venv/
 data/API/key.env
+data/user_prefs.json
 *.pyc
 __pycache__/
 .env
