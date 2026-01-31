@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QHBoxLayout, QGridLayout, QCheckBox, QComboBox,
     QPushButton, QDoubleSpinBox, QDialog, QPlainTextEdit, QDialogButtonBox,
     QLineEdit, QButtonGroup, QStyledItemDelegate, QStyle, QFileDialog, QStyleOptionViewItem,
-    QSlider
+    QSlider, QSpinBox, QFrame
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QSize, QModelIndex
 from PyQt6.QtGui import QColor, QBrush, QFontMetrics, QPalette, QPainter
@@ -16,6 +16,7 @@ import time
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
+import numpy as np
 from the_odds_api import OddsAPI
 from config import (
     PALETTE, PALETTES, THEODDSAPI_KEY_PROD, ODDS_FORMAT
@@ -31,6 +32,7 @@ from utils import (
     save_user_prefs,
 )
 from rich import print
+import pyqtgraph as pg
 
 
 odds_api: OddsAPI | None = None
@@ -901,6 +903,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self._event_odds_cache = {}
         self._event_odds_cache_ttl = 12
         self.sport_selection_window = None
+        self.analytics_window = None
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -1013,6 +1016,10 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self.reset_filters_button = QPushButton("Reset Filters", self)
         self.reset_filters_button.clicked.connect(self._reset_filters)
         quick_actions.addWidget(self.reset_filters_button)
+        self.analytics_button = QPushButton("Analytics", self)
+        self.analytics_button.setToolTip("Open Monte Carlo analytics for current Kelly wagers")
+        self.analytics_button.clicked.connect(self.open_analytics)
+        quick_actions.addWidget(self.analytics_button)
         quick_actions.addStretch(1)
         main_layout.addLayout(quick_actions)
 
@@ -1129,6 +1136,17 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self.startup_window.show()
         self.close()
 
+    def open_analytics(self):
+        wagers = self._collect_kelly_wagers()
+        self.analytics_window = AnalyticsWindow(wagers=wagers)
+        self.analytics_window.show()
+
+    def _collect_kelly_wagers(self) -> List[dict]:
+        try:
+            return list(getattr(self, "_latest_wagers", []) or [])
+        except Exception:
+            return []
+
     def update_table(self):
         if not hasattr(self, "table"):
             return
@@ -1136,6 +1154,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         self.table.setRowCount(0)
         # clear cached row->event mapping
         self._row_event_map = []
+        self._latest_wagers = []
 
         try:
             odds_data = self.fetch_odds_data()
@@ -1736,6 +1755,8 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             best_sportsbook = None
             best_edge = -float('inf')
             best_kelly = 0
+            best_price = None
+            best_user_prob = None
 
             if consensus_probability is not None:
                 for account_key in self.selected_accounts:
@@ -1771,6 +1792,8 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                                     best_edge = edge
                                     best_kelly = kelly
                                     best_sportsbook = account_key
+                                    best_price = user_outcome.get('price')
+                                    best_user_prob = user_probability
                             except Exception:
                                 continue
             else:
@@ -1785,13 +1808,43 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             self.table.setItem(row, best_sportsbook_col, QTableWidgetItem(self.sportsbook_mapping[best_sportsbook] if best_sportsbook else "N/A"))
             self.table.setItem(row, edge_col, QTableWidgetItem(f"{best_edge:.2%}"))
             kelly_amount_text = "N/A"
+            kelly_amount = 0.0
             if best_sportsbook:
                 try:
                     bankroll = float(self.selected_accounts.get(best_sportsbook, 0))
-                    kelly_amount_text = f"${bankroll * best_kelly:,.2f}"
+                    kelly_amount = bankroll * best_kelly
+                    kelly_amount_text = f"${kelly_amount:,.2f}"
                 except Exception:
                     kelly_amount_text = "N/A"
             self.table.setItem(row, kelly_col, QTableWidgetItem(kelly_amount_text))
+            # Cache wager details for analytics (non-zero Kelly only)
+            try:
+                if (
+                    best_sportsbook
+                    and best_price is not None
+                    and consensus_probability is not None
+                    and best_kelly > 0
+                    and kelly_amount > 0
+                ):
+                    best_decimal = odds_converter(self._api_odds_format, "decimal", best_price)
+                    best_american = odds_converter(self._api_odds_format, "american", best_price)
+                    self._latest_wagers.append({
+                        "event": event_label,
+                        "outcome": outcome_name,
+                        "market": market_key,
+                        "sportsbook": best_sportsbook,
+                        "sportsbook_label": self.sportsbook_mapping.get(best_sportsbook, best_sportsbook),
+                        "price_raw": best_price,
+                        "odds_decimal": best_decimal,
+                        "odds_american": best_american,
+                        "consensus_probability": consensus_probability,
+                        "user_probability": best_user_prob,
+                        "edge": best_edge,
+                        "kelly_fraction": best_kelly,
+                        "stake": kelly_amount,
+                    })
+            except Exception:
+                pass
             # Conditional formatting for positive edge + best odds cell
             try:
                 if best_edge > 0:
@@ -1824,6 +1877,533 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                 self._event_row_groups.append((start_row, outcome_rows, event_label.lower()))
         except Exception:
             pass
+
+
+class AnalyticsWindow(QMainWindow):
+    def __init__(self, wagers: Optional[List[dict]] = None):
+        super().__init__()
+        self.setWindowTitle("Analytics")
+        self.setGeometry(120, 120, 1100, 700)
+        try:
+            self.showMaximized()
+        except Exception:
+            pass
+
+        self.wagers = wagers or []
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget.setLayout(main_layout)
+
+        title = QLabel("Analytics (Monte Carlo P/L Distribution)", self)
+        title.setStyleSheet("font-weight:700; font-size:15px;")
+        main_layout.addWidget(title)
+
+        hint = QLabel(
+            "Simulate expected profit/loss across current Kelly wagers.",
+            self
+        )
+        hint.setStyleSheet("font-size:11px;color:gray;")
+        main_layout.addWidget(hint)
+
+        filters_box = QFrame(self)
+        filters_box.setObjectName("filtersBox")
+        filters_layout = QHBoxLayout(filters_box)
+        filters_layout.setContentsMargins(8, 6, 8, 6)
+        filters_layout.setSpacing(12)
+
+        trials_label = QLabel("Trials", self)
+        self.trials_input = QSpinBox(self)
+        self.trials_input.setRange(100, 200000)
+        self.trials_input.setSingleStep(1000)
+        self.trials_input.setValue(10000)
+        self.trials_input.setMinimumWidth(110)
+
+        min_kelly_label = QLabel("Min Kelly ($)", self)
+        self.min_kelly_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.min_kelly_slider.setRange(0, 500)
+        self.min_kelly_slider.setValue(0)
+        self.min_kelly_slider.setMinimumWidth(140)
+        self.min_kelly_value = QLabel("$0", self)
+        self.min_kelly_value.setMinimumWidth(44)
+
+        min_odds_label = QLabel("Min Odds", self)
+        self.min_odds_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.min_odds_slider.setRange(-500, 2000)
+        self.min_odds_slider.setValue(-200)
+        self.min_odds_slider.setMinimumWidth(140)
+        self.min_odds_value = QLabel("-200", self)
+        self.min_odds_value.setMinimumWidth(44)
+
+        max_odds_label = QLabel("Max Odds", self)
+        self.max_odds_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.max_odds_slider.setRange(-500, 2000)
+        self.max_odds_slider.setValue(1000)
+        self.max_odds_slider.setMinimumWidth(140)
+        self.max_odds_value = QLabel("+1000", self)
+        self.max_odds_value.setMinimumWidth(44)
+
+        self.recompute_button = QPushButton("Recompute", self)
+
+        filters_layout.addWidget(trials_label)
+        filters_layout.addWidget(self.trials_input)
+        filters_layout.addWidget(min_kelly_label)
+        filters_layout.addWidget(self.min_kelly_slider)
+        filters_layout.addWidget(self.min_kelly_value)
+        filters_layout.addWidget(min_odds_label)
+        filters_layout.addWidget(self.min_odds_slider)
+        filters_layout.addWidget(self.min_odds_value)
+        filters_layout.addWidget(max_odds_label)
+        filters_layout.addWidget(self.max_odds_slider)
+        filters_layout.addWidget(self.max_odds_value)
+        filters_layout.addStretch(1)
+        filters_layout.addWidget(self.recompute_button)
+        main_layout.addWidget(filters_box)
+
+        content_layout = QHBoxLayout()
+        main_layout.addLayout(content_layout, 1)
+
+        left_layout = QVBoxLayout()
+        content_layout.addLayout(left_layout, 3)
+
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground(None)
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.plot_widget.setTitle("Simulated P/L Distribution")
+        self.plot_widget.setLabel('bottom', 'Total Profit / Loss')
+        self.plot_widget.setLabel('left', 'Frequency')
+        left_layout.addWidget(self.plot_widget, 3)
+
+        wagers_label = QLabel("Wagers Included", self)
+        wagers_label.setStyleSheet("font-weight:700;")
+        left_layout.addWidget(wagers_label)
+
+        self.wagers_table = QTableWidget()
+        self.wagers_table.setColumnCount(5)
+        self.wagers_table.setHorizontalHeaderLabels(["Event", "Outcome", "Market", "Book", "Kelly $"])
+        try:
+            header = self.wagers_table.horizontalHeader()
+            if header is not None:
+                header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+                header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+                header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        except Exception:
+            pass
+        self.wagers_table.setAlternatingRowColors(True)
+        self.wagers_table.setMinimumHeight(180)
+        left_layout.addWidget(self.wagers_table, 2)
+
+        stats_panel = QFrame(self)
+        stats_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        stats_layout = QVBoxLayout(stats_panel)
+        stats_layout.setContentsMargins(12, 10, 12, 10)
+        stats_layout.setSpacing(10)
+        stats_panel.setObjectName("analyticsSummary")
+        stats_panel.setStyleSheet(
+            "#analyticsSummary {"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            "stop:0 rgba(30,30,30,220), stop:1 rgba(20,20,20,220));"
+            "border: 1px solid rgba(255,255,255,30);"
+            "border-radius: 10px;"
+            "}"
+        )
+
+        summary_header = QHBoxLayout()
+        stats_title = QLabel("Summary", self)
+        stats_title.setStyleSheet("font-weight:700; font-size:22px;")
+        summary_header.addWidget(stats_title)
+
+        self.outlook_badge = QLabel("Outlook: --", self)
+        self.outlook_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.outlook_badge.setStyleSheet(
+            "padding:8px 14px;border-radius:12px;background:rgba(255,255,255,24);"
+            "font-weight:800;font-size:20px;"
+        )
+        summary_header.addStretch(1)
+        summary_header.addWidget(self.outlook_badge)
+        stats_layout.addLayout(summary_header)
+
+        stats_grid = QGridLayout()
+        stats_grid.setHorizontalSpacing(14)
+        stats_grid.setVerticalSpacing(8)
+        stats_layout.addLayout(stats_grid)
+
+        self.stats_labels = {}
+        stat_rows = [
+            ("Wagers", "0"),
+            ("Total Stake", "$0"),
+            ("Mean P/L", "$0"),
+            ("Median P/L", "$0"),
+            ("5th %ile", "$0"),
+            ("95th %ile", "$0"),
+            ("Prob. Loss", "0%"),
+        ]
+        for row_idx, (label, value) in enumerate(stat_rows):
+            key_label = QLabel(label, self)
+            key_label.setStyleSheet("color:gray; font-size:18px;")
+            val_label = QLabel(value, self)
+            val_label.setStyleSheet("font-size:20px; font-weight:800;")
+            val_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            stats_grid.addWidget(key_label, row_idx, 0)
+            stats_grid.addWidget(val_label, row_idx, 1)
+            self.stats_labels[label] = val_label
+
+        breakdown_title = QLabel("Breakdown", self)
+        breakdown_title.setStyleSheet("font-weight:700; font-size:16px;")
+        stats_layout.addWidget(breakdown_title)
+
+        breakdown_grid = QGridLayout()
+        breakdown_grid.setHorizontalSpacing(10)
+        breakdown_grid.setVerticalSpacing(6)
+        stats_layout.addLayout(breakdown_grid)
+
+        market_label = QLabel("By Market", self)
+        market_label.setStyleSheet("color:gray; font-size:14px;")
+        self.market_breakdown = QPlainTextEdit(self)
+        self.market_breakdown.setReadOnly(True)
+        self.market_breakdown.setMaximumHeight(90)
+        self.market_breakdown.setPlaceholderText("No wagers yet.")
+        self.market_breakdown.setStyleSheet("font-size:13px;")
+
+        book_label = QLabel("By Sportsbook", self)
+        book_label.setStyleSheet("color:gray; font-size:14px;")
+        self.book_breakdown = QPlainTextEdit(self)
+        self.book_breakdown.setReadOnly(True)
+        self.book_breakdown.setMaximumHeight(90)
+        self.book_breakdown.setPlaceholderText("No wagers yet.")
+        self.book_breakdown.setStyleSheet("font-size:13px;")
+
+        breakdown_grid.addWidget(market_label, 0, 0)
+        breakdown_grid.addWidget(self.market_breakdown, 1, 0)
+        breakdown_grid.addWidget(book_label, 2, 0)
+        breakdown_grid.addWidget(self.book_breakdown, 3, 0)
+
+        stats_layout.addStretch(1)
+        content_layout.addWidget(stats_panel, 1)
+
+        self._wire_filter_labels()
+        self._wire_filter_updates()
+        self._sync_slider_ranges()
+        self._refresh_stats()
+
+        button_layout = QHBoxLayout()
+        self.close_button = QPushButton("Close", self)
+        self.close_button.clicked.connect(self.close)
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.close_button)
+        main_layout.addLayout(button_layout)
+
+    def _wire_filter_labels(self):
+        def _set_kelly(val: int):
+            self.min_kelly_value.setText(f"${val}")
+        def _set_min_odds(val: int):
+            sign = "+" if val > 0 else ""
+            self.min_odds_value.setText(f"{sign}{val}")
+        def _set_max_odds(val: int):
+            sign = "+" if val > 0 else ""
+            self.max_odds_value.setText(f"{sign}{val}")
+        self.min_kelly_slider.valueChanged.connect(_set_kelly)
+        self.min_odds_slider.valueChanged.connect(_set_min_odds)
+        self.max_odds_slider.valueChanged.connect(_set_max_odds)
+
+    def _wire_filter_updates(self):
+        self.min_kelly_slider.valueChanged.connect(lambda _: self._refresh_stats())
+        self.min_odds_slider.valueChanged.connect(lambda _: self._refresh_stats())
+        self.max_odds_slider.valueChanged.connect(lambda _: self._refresh_stats())
+        self.trials_input.valueChanged.connect(lambda _: self._refresh_stats())
+        self.recompute_button.clicked.connect(self._refresh_stats)
+
+    def _sync_slider_ranges(self):
+        max_kelly = 0
+        min_odds = None
+        max_odds = None
+        for wager in self.wagers:
+            try:
+                stake = float(wager.get("stake", 0))
+                odds_american = int(round(float(wager.get("odds_american", 0))))
+            except Exception:
+                continue
+            if stake <= 0:
+                continue
+            if stake > max_kelly:
+                max_kelly = stake
+            if min_odds is None or odds_american < min_odds:
+                min_odds = odds_american
+            if max_odds is None or odds_american > max_odds:
+                max_odds = odds_american
+
+        max_kelly_int = max(int(round(max_kelly)), 0)
+        if max_kelly_int < 5:
+            max_kelly_int = 5
+        self.min_kelly_slider.setRange(0, max_kelly_int)
+        if self.min_kelly_slider.value() > max_kelly_int:
+            self.min_kelly_slider.setValue(max_kelly_int)
+
+        if min_odds is None or max_odds is None:
+            min_odds, max_odds = -500, 2000
+        if min_odds > max_odds:
+            min_odds, max_odds = max_odds, min_odds
+
+        self.min_odds_slider.setRange(min_odds, max_odds)
+        self.max_odds_slider.setRange(min_odds, max_odds)
+        if self.min_odds_slider.value() < min_odds:
+            self.min_odds_slider.setValue(min_odds)
+        if self.max_odds_slider.value() > max_odds:
+            self.max_odds_slider.setValue(max_odds)
+
+        # Update labels after range adjustments
+        self.min_kelly_value.setText(f"${self.min_kelly_slider.value()}")
+        min_val = self.min_odds_slider.value()
+        max_val = self.max_odds_slider.value()
+        self.min_odds_value.setText(f"{'+' if min_val > 0 else ''}{min_val}")
+        self.max_odds_value.setText(f"{'+' if max_val > 0 else ''}{max_val}")
+
+    def _filtered_wagers(self) -> List[dict]:
+        min_kelly = float(self.min_kelly_slider.value())
+        min_odds = int(self.min_odds_slider.value())
+        max_odds = int(self.max_odds_slider.value())
+        if min_odds > max_odds:
+            self.max_odds_slider.setValue(min_odds)
+            max_odds = min_odds
+
+        filtered = []
+        for wager in self.wagers:
+            try:
+                stake = float(wager.get("stake", 0))
+                odds_american = int(round(float(wager.get("odds_american", 0))))
+            except Exception:
+                continue
+            if stake < min_kelly:
+                continue
+            if odds_american < min_odds or odds_american > max_odds:
+                continue
+            filtered.append(wager)
+        return filtered
+
+    def _format_money(self, value: float) -> str:
+        try:
+            return f"${value:,.2f}"
+        except Exception:
+            return "N/A"
+
+    def _refresh_stats(self):
+        wagers = self._filtered_wagers()
+        total_stake = 0.0
+        market_counts: Dict[str, int] = {}
+        book_counts: Dict[str, int] = {}
+        for wager in wagers:
+            try:
+                total_stake += float(wager.get("stake", 0))
+            except Exception:
+                pass
+            try:
+                market = str(wager.get("market", "Unknown"))
+                market_counts[market] = market_counts.get(market, 0) + 1
+            except Exception:
+                pass
+            try:
+                book = str(wager.get("sportsbook_label", wager.get("sportsbook", "Unknown")))
+                book_counts[book] = book_counts.get(book, 0) + 1
+            except Exception:
+                pass
+
+        self.stats_labels["Wagers"].setText(str(len(wagers)))
+        self.stats_labels["Total Stake"].setText(self._format_money(total_stake))
+        self.stats_labels["Mean P/L"].setText("N/A")
+        self.stats_labels["Median P/L"].setText("N/A")
+        self.stats_labels["5th %ile"].setText("N/A")
+        self.stats_labels["95th %ile"].setText("N/A")
+        self.stats_labels["Prob. Loss"].setText("N/A")
+        self.market_breakdown.setPlainText(
+            "\n".join([f"{k}: {v}" for k, v in sorted(market_counts.items(), key=lambda x: (-x[1], x[0]))])
+            or "No wagers yet."
+        )
+        self.book_breakdown.setPlainText(
+            "\n".join([f"{k}: {v}" for k, v in sorted(book_counts.items(), key=lambda x: (-x[1], x[0]))])
+            or "No wagers yet."
+        )
+        self._refresh_wagers_table(wagers)
+        self._run_simulation(wagers)
+
+    def _refresh_wagers_table(self, wagers: List[dict]):
+        self.wagers_table.setRowCount(0)
+        max_rows = 50
+        for idx, wager in enumerate(wagers[:max_rows]):
+            row = self.wagers_table.rowCount()
+            self.wagers_table.insertRow(row)
+            event = str(wager.get("event", ""))
+            outcome = str(wager.get("outcome", ""))
+            market = str(wager.get("market", ""))
+            book = str(wager.get("sportsbook_label", wager.get("sportsbook", "")))
+            try:
+                stake_val = float(wager.get("stake", 0.0))
+            except Exception:
+                stake_val = 0.0
+            stake = self._format_money(stake_val)
+
+            self.wagers_table.setItem(row, 0, QTableWidgetItem(event))
+            self.wagers_table.setItem(row, 1, QTableWidgetItem(outcome))
+            self.wagers_table.setItem(row, 2, QTableWidgetItem(market))
+            self.wagers_table.setItem(row, 3, QTableWidgetItem(book))
+            self.wagers_table.setItem(row, 4, QTableWidgetItem(stake))
+        if len(wagers) > max_rows:
+            row = self.wagers_table.rowCount()
+            self.wagers_table.insertRow(row)
+            note = QTableWidgetItem(f"... +{len(wagers) - max_rows} more")
+            note.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.wagers_table.setSpan(row, 0, 1, 5)
+            self.wagers_table.setItem(row, 0, note)
+
+    def _run_simulation(self, wagers: List[dict]):
+        trials = int(self.trials_input.value())
+        if not wagers or trials <= 0:
+            self.plot_widget.clear()
+            self.plot_widget.setTitle("Simulated P/L Distribution")
+            self._set_outlook_badge(None)
+            return
+
+        totals = np.zeros(trials, dtype=float)
+        rng = np.random.default_rng()
+
+        for wager in wagers:
+            try:
+                prob = float(wager.get("consensus_probability", 0))
+                stake = float(wager.get("stake", 0))
+                dec = float(wager.get("odds_decimal", 0))
+            except Exception:
+                continue
+            if stake <= 0 or dec <= 1 or prob <= 0:
+                continue
+            if prob > 1:
+                prob = 1.0
+            win_profit = stake * (dec - 1.0)
+            wins = rng.random(trials) < prob
+            totals += np.where(wins, win_profit, -stake)
+
+        if totals.size == 0:
+            self.plot_widget.clear()
+            self.plot_widget.setTitle("Simulated P/L Distribution")
+            self._set_outlook_badge(None)
+            return
+
+        mean_val = float(np.mean(totals))
+        median_val = float(np.median(totals))
+        p5 = float(np.percentile(totals, 5))
+        p95 = float(np.percentile(totals, 95))
+        prob_loss = float(np.mean(totals < 0))
+
+        self.stats_labels["Mean P/L"].setText(self._format_money(mean_val))
+        self.stats_labels["Median P/L"].setText(self._format_money(median_val))
+        self.stats_labels["5th %ile"].setText(self._format_money(p5))
+        self.stats_labels["95th %ile"].setText(self._format_money(p95))
+        self.stats_labels["Prob. Loss"].setText(f"{prob_loss:.1%}")
+        self._style_summary_values(mean_val, median_val, p5, p95, prob_loss)
+
+        self._render_histogram(totals)
+        self._set_outlook_badge(mean_val, median_val, prob_loss)
+
+    def _render_histogram(self, totals: np.ndarray):
+        self.plot_widget.clear()
+        bins = 60
+        hist, edges = np.histogram(totals, bins=bins)
+        if hist.size == 0:
+            return
+        color = self.palette().color(QPalette.ColorRole.Highlight)
+        edge_color = self.palette().color(QPalette.ColorRole.Text)
+        brush = pg.mkBrush(color)
+        pen = pg.mkPen(edge_color, width=1)
+        bars = pg.BarGraphItem(
+            x0=edges[:-1],
+            x1=edges[1:],
+            height=hist,
+            brush=brush,
+            pen=pen,
+        )
+        self.plot_widget.addItem(bars)
+
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        try:
+            grid = np.linspace(centers.min(), centers.max(), 300)
+            sigma = max(np.std(totals) * 0.25, 1e-6)
+            kde = np.zeros_like(grid)
+            for c, h in zip(centers, hist):
+                if h <= 0:
+                    continue
+                kde += h * np.exp(-0.5 * ((grid - c) / sigma) ** 2)
+            if kde.max() > 0:
+                kde = kde / kde.max() * (hist.max() * 1.05)
+            curve_color = self.palette().color(QPalette.ColorRole.Highlight).lighter(130)
+            curve_pen = pg.mkPen(curve_color, width=2)
+            self.plot_widget.plot(grid, kde, pen=curve_pen)
+
+            fill_color = curve_color
+            fill_brush = pg.mkBrush(fill_color)
+            fill = pg.FillBetweenItem(
+                pg.PlotDataItem(grid, kde),
+                pg.PlotDataItem(grid, np.zeros_like(grid)),
+                brush=fill_brush
+            )
+            fill.setOpacity(0.2)
+            self.plot_widget.addItem(fill)
+        except Exception:
+            pass
+
+        self.plot_widget.setTitle(f"Simulated P/L Distribution (n={len(totals):,})")
+
+    def _set_outlook_badge(self, mean_val: Optional[float], median_val: Optional[float] = None, prob_loss: Optional[float] = None):
+        if mean_val is None or median_val is None or prob_loss is None:
+            self.outlook_badge.setText("Outlook: --")
+            self.outlook_badge.setStyleSheet(
+                "padding:8px 14px;border-radius:12px;background:rgba(255,255,255,24);"
+                "font-weight:800;font-size:20px;"
+            )
+            return
+
+        positive_ev = mean_val > 0
+        positive_median = median_val > 0
+        low_loss_prob = prob_loss < 0.5
+        good_signals = sum([positive_ev, positive_median, low_loss_prob])
+
+        if good_signals >= 3:
+            label = "Outlook: Favorable"
+            color = "rgba(60, 200, 120, 190)"
+            text_color = "#0b0b0b"
+        elif good_signals <= 1:
+            label = "Outlook: Risky"
+            color = "rgba(220, 80, 80, 190)"
+            text_color = "#0b0b0b"
+        else:
+            label = "Outlook: Mixed"
+            color = "rgba(240, 180, 80, 190)"
+            text_color = "#0b0b0b"
+
+        self.outlook_badge.setText(label)
+        self.outlook_badge.setStyleSheet(
+            f"padding:8px 14px;border-radius:12px;background:{color};"
+            f"font-weight:800;font-size:20px;color:{text_color};"
+        )
+
+    def _style_summary_values(
+        self,
+        mean_val: float,
+        median_val: float,
+        p5: float,
+        p95: float,
+        prob_loss: float
+    ):
+        positive = "color: rgba(80, 220, 140, 230); font-weight:900; font-size:20px;"
+        negative = "color: rgba(235, 110, 110, 230); font-weight:900; font-size:20px;"
+        neutral = "color: rgba(230, 230, 230, 230); font-weight:900; font-size:20px;"
+        warn = "color: rgba(240, 190, 80, 230); font-weight:900; font-size:20px;"
+
+        self.stats_labels["Mean P/L"].setStyleSheet(positive if mean_val > 0 else negative if mean_val < 0 else neutral)
+        self.stats_labels["Median P/L"].setStyleSheet(positive if median_val > 0 else negative if median_val < 0 else neutral)
+        self.stats_labels["5th %ile"].setStyleSheet(negative if p5 < 0 else neutral)
+        self.stats_labels["95th %ile"].setStyleSheet(positive if p95 > 0 else neutral)
+        self.stats_labels["Prob. Loss"].setStyleSheet(positive if prob_loss < 0.5 else warn if prob_loss < 0.6 else negative)
 
 
 class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
