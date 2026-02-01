@@ -946,9 +946,13 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         # connect after table is created
         top_bar.addWidget(self.market_dropdown)
 
-        # Period Selection Dropdown (placeholder for future wiring)
+        # Period Selection Dropdown (Moneyline-only for now)
         self.period_dropdown = QComboBox(self)
-        self.period_dropdown.addItems(["Full Game"])
+        self.period_dropdown.addItems(["Full Game", "Regulation Time (3-Way)"])
+        self._period_market_map = {
+            "Full Game": "h2h",
+            "Regulation Time (3-Way)": "h2h_3_way",
+        }
         top_bar.addWidget(self.period_dropdown)
 
         # Pre-Game / Live toggle (UI only for now)
@@ -1064,12 +1068,15 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         # Now that the table exists, connect update triggers safely
         try:
             self.sport_dropdown.currentIndexChanged.connect(self._on_sport_changed)
-            self.market_dropdown.currentIndexChanged.connect(self.update_table)
+            self.market_dropdown.currentIndexChanged.connect(self._on_market_changed)
+            self.period_dropdown.currentIndexChanged.connect(self._on_period_changed)
             self.live_toggle_group.buttonClicked.connect(lambda _: self.update_table())
             self.search_input.textChanged.connect(self._filter_events_list)
             self.odds_format_dropdown.currentTextChanged.connect(self._on_odds_format_changed)
         except Exception:
             pass
+
+        self._sync_period_dropdown()
 
         self.update_table()
 
@@ -1106,8 +1113,29 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
         sport_key = self.sport_dropdown.itemData(idx) or self.sport_dropdown.currentText()
         self.update_sport(sport_key)
 
+    def _on_market_changed(self, idx: int):
+        self._sync_period_dropdown()
+        self.update_table()
+
+    def _on_period_changed(self, idx: int):
+        if (self.market_dropdown.currentData() or "") == "h2h":
+            self.update_table()
+
     def _current_market_key(self) -> str:
-        return self.market_dropdown.currentData() or self.market_dropdown.currentText()
+        market_key = self.market_dropdown.currentData() or self.market_dropdown.currentText()
+        if market_key == "h2h":
+            period_label = self.period_dropdown.currentText()
+            return self._period_market_map.get(period_label, "h2h")
+        return market_key
+
+    def _sync_period_dropdown(self):
+        try:
+            moneyline_selected = (self.market_dropdown.currentData() or "") == "h2h"
+            self.period_dropdown.setEnabled(moneyline_selected)
+            if not moneyline_selected:
+                self.period_dropdown.setCurrentIndex(0)
+        except Exception:
+            pass
 
     def update_sport(self, sport):
         self.current_sport = sport
@@ -1348,12 +1376,21 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
             return cached.get('data')
 
         try:
-            response = _require_odds_api().get_odds(
-                sport=self.current_sport,
-                markets=market_key,
-                odds_format=self._api_odds_format,
-                bookmakers=bookmakers
-            )
+            if market_key == "h2h_3_way":
+                response = _require_odds_api().get_odds(
+                    sport=self.current_sport,
+                    markets="h2h",
+                    odds_format=self._api_odds_format,
+                    bookmakers=bookmakers
+                )
+                response = self._hydrate_three_way_markets(response, bookmakers)
+            else:
+                response = _require_odds_api().get_odds(
+                    sport=self.current_sport,
+                    markets=market_key,
+                    odds_format=self._api_odds_format,
+                    bookmakers=bookmakers
+                )
         except Exception as e:
             msg = str(e)
             if "429" in msg and cached:
@@ -1366,11 +1403,112 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
                 return self._last_odds_data
             raise
 
+        if market_key == "h2h_3_way" and not response:
+            fallback_key = "h2h"
+            fallback_cache_key = (self.current_sport, fallback_key, self._api_odds_format, bookmakers)
+            cached_fallback = self._odds_cache.get(fallback_cache_key)
+            if cached_fallback and now - cached_fallback.get('ts', 0) < self._odds_cache_ttl:
+                try:
+                    self.period_dropdown.setCurrentIndex(0)
+                except Exception:
+                    pass
+                self._last_odds_snapshot_ts = cached_fallback.get('ts')
+                self._last_odds_snapshot_cached = True
+                return cached_fallback.get('data')
+
+            try:
+                response = _require_odds_api().get_odds(
+                    sport=self.current_sport,
+                    markets=fallback_key,
+                    odds_format=self._api_odds_format,
+                    bookmakers=bookmakers
+                )
+                try:
+                    self.period_dropdown.setCurrentIndex(0)
+                except Exception:
+                    pass
+                market_key = fallback_key
+                cache_key = fallback_cache_key
+            except Exception:
+                pass
+
         self._odds_cache[cache_key] = {"ts": now, "data": response}
         self._last_odds_snapshot_ts = now
         self._last_odds_snapshot_cached = False
         print(response)
         return response
+
+    def _hydrate_three_way_markets(self, odds_data, bookmakers):
+        if not isinstance(odds_data, list):
+            return odds_data
+
+        api = _require_odds_api()
+        now = time.time()
+        hydrated_events = []
+
+        for event in odds_data:
+            event_id = event.get('id')
+            if not event_id:
+                continue
+            cache_key = (event_id, "h2h_3_way", self._api_odds_format, bookmakers)
+            event_odds = None
+            cached = self._event_odds_cache.get(cache_key)
+            if cached and now - cached.get('ts', 0) < self._event_odds_cache_ttl:
+                event_odds = cached.get('data')
+            else:
+                try:
+                    event_odds = api.get_event_odds(
+                        sport=self.current_sport,
+                        event_id=event_id,
+                        markets="h2h_3_way",
+                        odds_format=self._api_odds_format,
+                        bookmakers=bookmakers,
+                    )
+                except Exception:
+                    continue
+                self._event_odds_cache[cache_key] = {"ts": now, "data": event_odds}
+
+            if isinstance(event_odds, list):
+                event_odds = event_odds[0] if event_odds else None
+            if not isinstance(event_odds, dict):
+                continue
+
+            markets_found = False
+            for bookmaker in event_odds.get('bookmakers', []) or []:
+                market = next((m for m in bookmaker.get('markets', []) if m.get('key') == "h2h_3_way"), None)
+                if market:
+                    markets_found = True
+                    break
+
+            if not markets_found:
+                try:
+                    event_odds = api.get_event_odds(
+                        sport=self.current_sport,
+                        event_id=event_id,
+                        markets="h2h_3_way",
+                        odds_format=self._api_odds_format,
+                        bookmakers=None,
+                    )
+                except Exception:
+                    continue
+                if isinstance(event_odds, list):
+                    event_odds = event_odds[0] if event_odds else None
+                if not isinstance(event_odds, dict):
+                    continue
+                for bookmaker in event_odds.get('bookmakers', []) or []:
+                    market = next((m for m in bookmaker.get('markets', []) if m.get('key') == "h2h_3_way"), None)
+                    if market:
+                        markets_found = True
+                        break
+
+            if not markets_found:
+                continue
+
+            hydrated = dict(event)
+            hydrated['bookmakers'] = event_odds.get('bookmakers', []) or []
+            hydrated_events.append(hydrated)
+
+        return hydrated_events
 
     def _export_csv(self):
         _export_table_to_csv(self, self.table, f"current_odds_{self.current_sport}")
