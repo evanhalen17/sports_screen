@@ -2178,6 +2178,7 @@ class AnalyticsWindow(QMainWindow):
             ("5th %ile", "$0"),
             ("95th %ile", "$0"),
             ("Prob. Loss", "0%"),
+            ("Prob. Total Ruin", "0%"),
         ]
         for row_idx, (label, value) in enumerate(stat_rows):
             key_label = QLabel(label, self)
@@ -2355,6 +2356,7 @@ class AnalyticsWindow(QMainWindow):
         self.stats_labels["5th %ile"].setText("N/A")
         self.stats_labels["95th %ile"].setText("N/A")
         self.stats_labels["Prob. Loss"].setText("N/A")
+        self.stats_labels["Prob. Total Ruin"].setText("N/A")
         self.market_breakdown.setPlainText(
             "\n".join([f"{k}: {v}" for k, v in sorted(market_counts.items(), key=lambda x: (-x[1], x[0]))])
             or "No wagers yet."
@@ -2432,13 +2434,33 @@ class AnalyticsWindow(QMainWindow):
         p5 = float(np.percentile(totals, 5))
         p95 = float(np.percentile(totals, 95))
         prob_loss = float(np.mean(totals < 0))
+        prob_all_lose = None
+        valid_wagers = 0
+        for wager in wagers:
+            try:
+                prob = float(wager.get("consensus_probability", 0))
+                stake = float(wager.get("stake", 0))
+                dec = float(wager.get("odds_decimal", 0))
+            except Exception:
+                continue
+            if stake <= 0 or dec <= 1 or prob <= 0:
+                continue
+            if prob > 1:
+                prob = 1.0
+            valid_wagers += 1
+            lose_prob = 1.0 - prob
+            prob_all_lose = lose_prob if prob_all_lose is None else prob_all_lose * lose_prob
 
         self.stats_labels["Mean P/L"].setText(self._format_money(mean_val))
         self.stats_labels["Median P/L"].setText(self._format_money(median_val))
         self.stats_labels["5th %ile"].setText(self._format_money(p5))
         self.stats_labels["95th %ile"].setText(self._format_money(p95))
         self.stats_labels["Prob. Loss"].setText(f"{prob_loss:.1%}")
-        self._style_summary_values(mean_val, median_val, p5, p95, prob_loss)
+        if prob_all_lose is not None and valid_wagers > 0:
+            self.stats_labels["Prob. Total Ruin"].setText(f"{prob_all_lose:.3%}")
+        else:
+            self.stats_labels["Prob. Total Ruin"].setText("N/A")
+        self._style_summary_values(mean_val, median_val, p5, p95, prob_loss, prob_all_lose)
 
         self._render_histogram(totals)
         self._set_outlook_badge(mean_val, median_val, prob_loss)
@@ -2530,7 +2552,8 @@ class AnalyticsWindow(QMainWindow):
         median_val: float,
         p5: float,
         p95: float,
-        prob_loss: float
+        prob_loss: float,
+        prob_all_lose: Optional[float],
     ):
         positive = "color: rgba(80, 220, 140, 230); font-weight:900; font-size:20px;"
         negative = "color: rgba(235, 110, 110, 230); font-weight:900; font-size:20px;"
@@ -2542,6 +2565,12 @@ class AnalyticsWindow(QMainWindow):
         self.stats_labels["5th %ile"].setStyleSheet(negative if p5 < 0 else neutral)
         self.stats_labels["95th %ile"].setStyleSheet(positive if p95 > 0 else neutral)
         self.stats_labels["Prob. Loss"].setStyleSheet(positive if prob_loss < 0.5 else warn if prob_loss < 0.6 else negative)
+        if prob_all_lose is None:
+            self.stats_labels["Prob. Total Ruin"].setStyleSheet(neutral)
+        else:
+            self.stats_labels["Prob. Total Ruin"].setStyleSheet(
+                negative if prob_all_lose > 0.2 else warn if prob_all_lose > 0.1 else positive
+            )
 
 
 class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
