@@ -2169,6 +2169,17 @@ class AnalyticsWindow(QMainWindow):
         stats_grid.setVerticalSpacing(8)
         stats_layout.addLayout(stats_grid)
 
+        header_spacer = QLabel("", self)
+        header_kelly = QLabel("Kelly", self)
+        header_kelly.setStyleSheet("font-weight:800; font-size:16px;")
+        header_kelly.setAlignment(Qt.AlignmentFlag.AlignRight)
+        header_half = QLabel("1/2 Kelly", self)
+        header_half.setStyleSheet("font-weight:800; font-size:16px;")
+        header_half.setAlignment(Qt.AlignmentFlag.AlignRight)
+        stats_grid.addWidget(header_spacer, 0, 0)
+        stats_grid.addWidget(header_kelly, 0, 1)
+        stats_grid.addWidget(header_half, 0, 2)
+
         self.stats_labels = {}
         stat_rows = [
             ("Wagers", "0"),
@@ -2180,15 +2191,19 @@ class AnalyticsWindow(QMainWindow):
             ("Prob. Loss", "0%"),
             ("Prob. Total Ruin", "0%"),
         ]
-        for row_idx, (label, value) in enumerate(stat_rows):
+        for row_idx, (label, value) in enumerate(stat_rows, start=1):
             key_label = QLabel(label, self)
             key_label.setStyleSheet("color:gray; font-size:18px;")
             val_label = QLabel(value, self)
             val_label.setStyleSheet("font-size:20px; font-weight:800;")
             val_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            half_label = QLabel(value, self)
+            half_label.setStyleSheet("font-size:20px; font-weight:800;")
+            half_label.setAlignment(Qt.AlignmentFlag.AlignRight)
             stats_grid.addWidget(key_label, row_idx, 0)
             stats_grid.addWidget(val_label, row_idx, 1)
-            self.stats_labels[label] = val_label
+            stats_grid.addWidget(half_label, row_idx, 2)
+            self.stats_labels[label] = (val_label, half_label)
 
         breakdown_title = QLabel("Breakdown", self)
         breakdown_title.setStyleSheet("font-weight:700; font-size:16px;")
@@ -2349,14 +2364,16 @@ class AnalyticsWindow(QMainWindow):
             except Exception:
                 pass
 
-        self.stats_labels["Wagers"].setText(str(len(wagers)))
-        self.stats_labels["Total Stake"].setText(self._format_money(total_stake))
-        self.stats_labels["Mean P/L"].setText("N/A")
-        self.stats_labels["Median P/L"].setText("N/A")
-        self.stats_labels["5th %ile"].setText("N/A")
-        self.stats_labels["95th %ile"].setText("N/A")
-        self.stats_labels["Prob. Loss"].setText("N/A")
-        self.stats_labels["Prob. Total Ruin"].setText("N/A")
+        wagers_label, wagers_half_label = self.stats_labels["Wagers"]
+        wagers_label.setText(str(len(wagers)))
+        wagers_half_label.setText(str(len(wagers)))
+        total_label, total_half_label = self.stats_labels["Total Stake"]
+        total_label.setText(self._format_money(total_stake))
+        total_half_label.setText(self._format_money(total_stake * 0.5))
+        for stat_key in ("Mean P/L", "Median P/L", "5th %ile", "95th %ile", "Prob. Loss", "Prob. Total Ruin"):
+            k_label, h_label = self.stats_labels[stat_key]
+            k_label.setText("N/A")
+            h_label.setText("N/A")
         self.market_breakdown.setPlainText(
             "\n".join([f"{k}: {v}" for k, v in sorted(market_counts.items(), key=lambda x: (-x[1], x[0]))])
             or "No wagers yet."
@@ -2405,37 +2422,10 @@ class AnalyticsWindow(QMainWindow):
             self._set_outlook_badge(None)
             return
 
-        totals = np.zeros(trials, dtype=float)
+        totals_kelly = np.zeros(trials, dtype=float)
         rng = np.random.default_rng()
-
-        for wager in wagers:
-            try:
-                prob = float(wager.get("consensus_probability", 0))
-                stake = float(wager.get("stake", 0))
-                dec = float(wager.get("odds_decimal", 0))
-            except Exception:
-                continue
-            if stake <= 0 or dec <= 1 or prob <= 0:
-                continue
-            if prob > 1:
-                prob = 1.0
-            win_profit = stake * (dec - 1.0)
-            wins = rng.random(trials) < prob
-            totals += np.where(wins, win_profit, -stake)
-
-        if totals.size == 0:
-            self.plot_widget.clear()
-            self.plot_widget.setTitle("Simulated P/L Distribution")
-            self._set_outlook_badge(None)
-            return
-
-        mean_val = float(np.mean(totals))
-        median_val = float(np.median(totals))
-        p5 = float(np.percentile(totals, 5))
-        p95 = float(np.percentile(totals, 95))
-        prob_loss = float(np.mean(totals < 0))
-        prob_all_lose = None
         valid_wagers = 0
+
         for wager in wagers:
             try:
                 prob = float(wager.get("consensus_probability", 0))
@@ -2448,70 +2438,148 @@ class AnalyticsWindow(QMainWindow):
             if prob > 1:
                 prob = 1.0
             valid_wagers += 1
+            win_profit = stake * (dec - 1.0)
+            wins = rng.random(trials) < prob
+            totals_kelly += np.where(wins, win_profit, -stake)
+
+        if valid_wagers == 0:
+            self.plot_widget.clear()
+            self.plot_widget.setTitle("Simulated P/L Distribution")
+            self._set_outlook_badge(None)
+            return
+
+        totals_half = totals_kelly * 0.5
+
+        mean_val = float(np.mean(totals_kelly))
+        median_val = float(np.median(totals_kelly))
+        p5 = float(np.percentile(totals_kelly, 5))
+        p95 = float(np.percentile(totals_kelly, 95))
+        prob_loss = float(np.mean(totals_kelly < 0))
+
+        mean_half = float(np.mean(totals_half))
+        median_half = float(np.median(totals_half))
+        p5_half = float(np.percentile(totals_half, 5))
+        p95_half = float(np.percentile(totals_half, 95))
+        prob_loss_half = float(np.mean(totals_half < 0))
+        prob_all_lose = None
+        for wager in wagers:
+            try:
+                prob = float(wager.get("consensus_probability", 0))
+                stake = float(wager.get("stake", 0))
+                dec = float(wager.get("odds_decimal", 0))
+            except Exception:
+                continue
+            if stake <= 0 or dec <= 1 or prob <= 0:
+                continue
+            if prob > 1:
+                prob = 1.0
             lose_prob = 1.0 - prob
             prob_all_lose = lose_prob if prob_all_lose is None else prob_all_lose * lose_prob
 
-        self.stats_labels["Mean P/L"].setText(self._format_money(mean_val))
-        self.stats_labels["Median P/L"].setText(self._format_money(median_val))
-        self.stats_labels["5th %ile"].setText(self._format_money(p5))
-        self.stats_labels["95th %ile"].setText(self._format_money(p95))
-        self.stats_labels["Prob. Loss"].setText(f"{prob_loss:.1%}")
-        if prob_all_lose is not None and valid_wagers > 0:
-            self.stats_labels["Prob. Total Ruin"].setText(f"{prob_all_lose:.3%}")
-        else:
-            self.stats_labels["Prob. Total Ruin"].setText("N/A")
-        self._style_summary_values(mean_val, median_val, p5, p95, prob_loss, prob_all_lose)
+        self.stats_labels["Mean P/L"][0].setText(self._format_money(mean_val))
+        self.stats_labels["Median P/L"][0].setText(self._format_money(median_val))
+        self.stats_labels["5th %ile"][0].setText(self._format_money(p5))
+        self.stats_labels["95th %ile"][0].setText(self._format_money(p95))
+        self.stats_labels["Prob. Loss"][0].setText(f"{prob_loss:.1%}")
 
-        self._render_histogram(totals)
+        self.stats_labels["Mean P/L"][1].setText(self._format_money(mean_half))
+        self.stats_labels["Median P/L"][1].setText(self._format_money(median_half))
+        self.stats_labels["5th %ile"][1].setText(self._format_money(p5_half))
+        self.stats_labels["95th %ile"][1].setText(self._format_money(p95_half))
+        self.stats_labels["Prob. Loss"][1].setText(f"{prob_loss_half:.1%}")
+
+        if prob_all_lose is not None and valid_wagers > 0:
+            ruin_text = f"{prob_all_lose:.3%}"
+            self.stats_labels["Prob. Total Ruin"][0].setText(ruin_text)
+            self.stats_labels["Prob. Total Ruin"][1].setText(ruin_text)
+        else:
+            self.stats_labels["Prob. Total Ruin"][0].setText("N/A")
+            self.stats_labels["Prob. Total Ruin"][1].setText("N/A")
+
+        self._style_summary_values(
+            mean_val,
+            median_val,
+            p5,
+            p95,
+            prob_loss,
+            prob_all_lose,
+            mean_half,
+            median_half,
+            p5_half,
+            p95_half,
+            prob_loss_half,
+        )
+
+        self._render_histogram(totals_kelly, totals_half)
         self._set_outlook_badge(mean_val, median_val, prob_loss)
 
-    def _render_histogram(self, totals: np.ndarray):
+    def _render_histogram(self, totals_kelly: np.ndarray, totals_half: np.ndarray):
         self.plot_widget.clear()
         bins = 60
-        hist, edges = np.histogram(totals, bins=bins)
-        if hist.size == 0:
+        hist_kelly, edges = np.histogram(totals_kelly, bins=bins)
+        hist_half, _ = np.histogram(totals_half, bins=edges) if totals_half.size else (np.zeros_like(hist_kelly), edges)
+        if hist_kelly.size == 0 and hist_half.size == 0:
             return
-        color = self.palette().color(QPalette.ColorRole.Highlight)
+
         edge_color = self.palette().color(QPalette.ColorRole.Text)
-        brush = pg.mkBrush(color)
+        kelly_color = self.palette().color(QPalette.ColorRole.Highlight)
+        half_color = self.palette().color(QPalette.ColorRole.Link)
+        if half_color == kelly_color:
+            half_color = kelly_color.lighter(140)
+
+        kelly_brush = pg.mkBrush(QColor(kelly_color.red(), kelly_color.green(), kelly_color.blue(), 120))
+        half_brush = pg.mkBrush(QColor(half_color.red(), half_color.green(), half_color.blue(), 120))
         pen = pg.mkPen(edge_color, width=1)
-        bars = pg.BarGraphItem(
+
+        kelly_bars = pg.BarGraphItem(
             x0=edges[:-1],
             x1=edges[1:],
-            height=hist,
-            brush=brush,
+            height=hist_kelly,
+            brush=kelly_brush,
             pen=pen,
         )
-        self.plot_widget.addItem(bars)
+        self.plot_widget.addItem(kelly_bars)
+
+        half_bars = pg.BarGraphItem(
+            x0=edges[:-1],
+            x1=edges[1:],
+            height=hist_half,
+            brush=half_brush,
+            pen=pen,
+        )
+        self.plot_widget.addItem(half_bars)
 
         centers = (edges[:-1] + edges[1:]) / 2.0
-        try:
-            grid = np.linspace(centers.min(), centers.max(), 300)
-            sigma = max(np.std(totals) * 0.25, 1e-6)
-            kde = np.zeros_like(grid)
-            for c, h in zip(centers, hist):
-                if h <= 0:
-                    continue
-                kde += h * np.exp(-0.5 * ((grid - c) / sigma) ** 2)
-            if kde.max() > 0:
-                kde = kde / kde.max() * (hist.max() * 1.05)
-            curve_color = self.palette().color(QPalette.ColorRole.Highlight).lighter(130)
-            curve_pen = pg.mkPen(curve_color, width=2)
-            self.plot_widget.plot(grid, kde, pen=curve_pen)
+        grid = np.linspace(centers.min(), centers.max(), 300)
 
-            fill_color = curve_color
-            fill_brush = pg.mkBrush(fill_color)
-            fill = pg.FillBetweenItem(
-                pg.PlotDataItem(grid, kde),
-                pg.PlotDataItem(grid, np.zeros_like(grid)),
-                brush=fill_brush
-            )
-            fill.setOpacity(0.2)
-            self.plot_widget.addItem(fill)
-        except Exception:
-            pass
+        def _plot_kde(hist: np.ndarray, totals: np.ndarray, color: QColor) -> None:
+            try:
+                sigma = max(np.std(totals) * 0.25, 1e-6)
+                kde = np.zeros_like(grid)
+                for c, h in zip(centers, hist):
+                    if h <= 0:
+                        continue
+                    kde += h * np.exp(-0.5 * ((grid - c) / sigma) ** 2)
+                if kde.max() > 0:
+                    kde = kde / kde.max() * (hist.max() * 1.05)
+                curve_pen = pg.mkPen(color, width=2)
+                self.plot_widget.plot(grid, kde, pen=curve_pen)
+                fill_brush = pg.mkBrush(color)
+                fill = pg.FillBetweenItem(
+                    pg.PlotDataItem(grid, kde),
+                    pg.PlotDataItem(grid, np.zeros_like(grid)),
+                    brush=fill_brush,
+                )
+                fill.setOpacity(0.15)
+                self.plot_widget.addItem(fill)
+            except Exception:
+                pass
 
-        self.plot_widget.setTitle(f"Simulated P/L Distribution (n={len(totals):,})")
+        _plot_kde(hist_kelly, totals_kelly, kelly_color.lighter(130))
+        if totals_half.size:
+            _plot_kde(hist_half, totals_half, half_color.lighter(130))
+
+        self.plot_widget.setTitle(f"Simulated P/L Distribution (Kelly vs 1/2 Kelly, n={len(totals_kelly):,})")
 
     def _set_outlook_badge(self, mean_val: Optional[float], median_val: Optional[float] = None, prob_loss: Optional[float] = None):
         if mean_val is None or median_val is None or prob_loss is None:
@@ -2554,23 +2622,43 @@ class AnalyticsWindow(QMainWindow):
         p95: float,
         prob_loss: float,
         prob_all_lose: Optional[float],
+        mean_half: float,
+        median_half: float,
+        p5_half: float,
+        p95_half: float,
+        prob_loss_half: float,
     ):
         positive = "color: rgba(80, 220, 140, 230); font-weight:900; font-size:20px;"
         negative = "color: rgba(235, 110, 110, 230); font-weight:900; font-size:20px;"
         neutral = "color: rgba(230, 230, 230, 230); font-weight:900; font-size:20px;"
         warn = "color: rgba(240, 190, 80, 230); font-weight:900; font-size:20px;"
 
-        self.stats_labels["Mean P/L"].setStyleSheet(positive if mean_val > 0 else negative if mean_val < 0 else neutral)
-        self.stats_labels["Median P/L"].setStyleSheet(positive if median_val > 0 else negative if median_val < 0 else neutral)
-        self.stats_labels["5th %ile"].setStyleSheet(negative if p5 < 0 else neutral)
-        self.stats_labels["95th %ile"].setStyleSheet(positive if p95 > 0 else neutral)
-        self.stats_labels["Prob. Loss"].setStyleSheet(positive if prob_loss < 0.5 else warn if prob_loss < 0.6 else negative)
+        self.stats_labels["Mean P/L"][0].setStyleSheet(positive if mean_val > 0 else negative if mean_val < 0 else neutral)
+        self.stats_labels["Median P/L"][0].setStyleSheet(positive if median_val > 0 else negative if median_val < 0 else neutral)
+        self.stats_labels["5th %ile"][0].setStyleSheet(negative if p5 < 0 else neutral)
+        self.stats_labels["95th %ile"][0].setStyleSheet(positive if p95 > 0 else neutral)
+        self.stats_labels["Prob. Loss"][0].setStyleSheet(
+            positive if prob_loss < 0.5 else warn if prob_loss < 0.6 else negative
+        )
+
+        self.stats_labels["Mean P/L"][1].setStyleSheet(positive if mean_half > 0 else negative if mean_half < 0 else neutral)
+        self.stats_labels["Median P/L"][1].setStyleSheet(
+            positive if median_half > 0 else negative if median_half < 0 else neutral
+        )
+        self.stats_labels["5th %ile"][1].setStyleSheet(negative if p5_half < 0 else neutral)
+        self.stats_labels["95th %ile"][1].setStyleSheet(positive if p95_half > 0 else neutral)
+        self.stats_labels["Prob. Loss"][1].setStyleSheet(
+            positive if prob_loss_half < 0.5 else warn if prob_loss_half < 0.6 else negative
+        )
         if prob_all_lose is None:
-            self.stats_labels["Prob. Total Ruin"].setStyleSheet(neutral)
+            self.stats_labels["Prob. Total Ruin"][0].setStyleSheet(neutral)
+            self.stats_labels["Prob. Total Ruin"][1].setStyleSheet(neutral)
         else:
-            self.stats_labels["Prob. Total Ruin"].setStyleSheet(
+            ruin_style = negative if prob_all_lose > 0.2 else warn if prob_all_lose > 0.1 else positive
+            self.stats_labels["Prob. Total Ruin"][0].setStyleSheet(
                 negative if prob_all_lose > 0.2 else warn if prob_all_lose > 0.1 else positive
             )
+            self.stats_labels["Prob. Total Ruin"][1].setStyleSheet(ruin_style)
 
 
 class FuturesOddsWindow(OddsWindowMixin, QMainWindow):
