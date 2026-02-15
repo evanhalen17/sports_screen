@@ -146,6 +146,7 @@ class StartupWindow(QMainWindow):
         self.current_odds_window = None
         self.futures_odds_window = None
         self.historical_analysis_window = None
+        self.analytics_window = None
 
         # Central widget and layout
         self.central_widget = QWidget()
@@ -264,6 +265,14 @@ class StartupWindow(QMainWindow):
             app = QApplication.instance()
             if isinstance(app, QApplication):
                 app.setStyleSheet(set_stylesheet(pal))
+            
+            # Update any open AnalyticsWindows
+            if hasattr(self, 'analytics_window') and self.analytics_window is not None:
+                self.analytics_window.apply_theme(theme_name, pal)
+            if hasattr(self, 'current_odds_window') and self.current_odds_window is not None:
+                if hasattr(self.current_odds_window, 'analytics_window') and self.current_odds_window.analytics_window is not None:
+                    self.current_odds_window.analytics_window.apply_theme(theme_name, pal)
+            
             prefs = load_user_prefs()
             if not isinstance(prefs, dict):
                 prefs = {}
@@ -1166,7 +1175,14 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
 
     def open_analytics(self):
         wagers = self._collect_kelly_wagers()
-        self.analytics_window = AnalyticsWindow(wagers=wagers)
+        try:
+            prefs = load_user_prefs()
+            current_theme = prefs.get('theme', 'dark') if isinstance(prefs, dict) else 'dark'
+            palette = PALETTES.get(current_theme, PALETTE)
+        except Exception:
+            current_theme = 'dark'
+            palette = PALETTE
+        self.analytics_window = AnalyticsWindow(wagers=wagers, theme=current_theme, palette=palette)
         self.analytics_window.show()
 
     def _collect_kelly_wagers(self) -> List[dict]:
@@ -2018,7 +2034,7 @@ class CurrentOddsWindow(OddsWindowMixin, QMainWindow):
 
 
 class AnalyticsWindow(QMainWindow):
-    def __init__(self, wagers: Optional[List[dict]] = None):
+    def __init__(self, wagers: Optional[List[dict]] = None, theme: str = 'dark', palette: Optional[Dict[str, str]] = None):
         super().__init__()
         self.setWindowTitle("Analytics")
         self.setGeometry(120, 120, 1100, 700)
@@ -2028,6 +2044,8 @@ class AnalyticsWindow(QMainWindow):
             pass
 
         self.wagers = wagers or []
+        self.current_theme = theme
+        self.palette_colors = palette or PALETTES.get(theme, PALETTE)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -2038,12 +2056,12 @@ class AnalyticsWindow(QMainWindow):
         title.setStyleSheet("font-weight:700; font-size:15px;")
         main_layout.addWidget(title)
 
-        hint = QLabel(
+        self.hint_label = QLabel(
             "Simulate expected profit/loss across current Kelly wagers.",
             self
         )
-        hint.setStyleSheet("font-size:11px;color:gray;")
-        main_layout.addWidget(hint)
+        self._update_hint_label_style()
+        main_layout.addWidget(self.hint_label)
 
         filters_box = QFrame(self)
         filters_box.setObjectName("filtersBox")
@@ -2106,7 +2124,7 @@ class AnalyticsWindow(QMainWindow):
         content_layout.addLayout(left_layout, 3)
 
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground(None)
+        self._apply_plot_widget_styling()
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self.plot_widget.setTitle("Simulated P/L Distribution")
         self.plot_widget.setLabel('bottom', 'Total Profit / Loss')
@@ -2140,14 +2158,8 @@ class AnalyticsWindow(QMainWindow):
         stats_layout.setContentsMargins(12, 10, 12, 10)
         stats_layout.setSpacing(10)
         stats_panel.setObjectName("analyticsSummary")
-        stats_panel.setStyleSheet(
-            "#analyticsSummary {"
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-            "stop:0 rgba(30,30,30,220), stop:1 rgba(20,20,20,220));"
-            "border: 1px solid rgba(255,255,255,30);"
-            "border-radius: 10px;"
-            "}"
-        )
+        self.stats_panel = stats_panel  # Store reference for theme updates
+        self._apply_stats_panel_style(stats_panel)
 
         summary_header = QHBoxLayout()
         stats_title = QLabel("Summary", self)
@@ -2156,10 +2168,7 @@ class AnalyticsWindow(QMainWindow):
 
         self.outlook_badge = QLabel("Outlook: --", self)
         self.outlook_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.outlook_badge.setStyleSheet(
-            "padding:8px 14px;border-radius:12px;background:rgba(255,255,255,24);"
-            "font-weight:800;font-size:20px;"
-        )
+        self._set_outlook_badge_default_style()
         summary_header.addStretch(1)
         summary_header.addWidget(self.outlook_badge)
         stats_layout.addLayout(summary_header)
@@ -2191,9 +2200,10 @@ class AnalyticsWindow(QMainWindow):
             ("Prob. Loss", "0%"),
             ("Prob. Total Ruin", "0%"),
         ]
+        self.stat_key_labels = []  # Store references for theme updates
         for row_idx, (label, value) in enumerate(stat_rows, start=1):
             key_label = QLabel(label, self)
-            key_label.setStyleSheet("color:gray; font-size:18px;")
+            self._update_stat_key_label_style(key_label)
             val_label = QLabel(value, self)
             val_label.setStyleSheet("font-size:20px; font-weight:800;")
             val_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -2204,6 +2214,7 @@ class AnalyticsWindow(QMainWindow):
             stats_grid.addWidget(val_label, row_idx, 1)
             stats_grid.addWidget(half_label, row_idx, 2)
             self.stats_labels[label] = (val_label, half_label)
+            self.stat_key_labels.append(key_label)
 
         breakdown_title = QLabel("Breakdown", self)
         breakdown_title.setStyleSheet("font-weight:700; font-size:16px;")
@@ -2214,25 +2225,25 @@ class AnalyticsWindow(QMainWindow):
         breakdown_grid.setVerticalSpacing(6)
         stats_layout.addLayout(breakdown_grid)
 
-        market_label = QLabel("By Market", self)
-        market_label.setStyleSheet("color:gray; font-size:14px;")
+        self.market_label = QLabel("By Market", self)
+        self._update_breakdown_label_style(self.market_label)
         self.market_breakdown = QPlainTextEdit(self)
         self.market_breakdown.setReadOnly(True)
         self.market_breakdown.setMaximumHeight(90)
         self.market_breakdown.setPlaceholderText("No wagers yet.")
-        self.market_breakdown.setStyleSheet("font-size:13px;")
+        self._apply_breakdown_panel_styling(self.market_breakdown)
 
-        book_label = QLabel("By Sportsbook", self)
-        book_label.setStyleSheet("color:gray; font-size:14px;")
+        self.book_label = QLabel("By Sportsbook", self)
+        self._update_breakdown_label_style(self.book_label)
         self.book_breakdown = QPlainTextEdit(self)
         self.book_breakdown.setReadOnly(True)
         self.book_breakdown.setMaximumHeight(90)
         self.book_breakdown.setPlaceholderText("No wagers yet.")
-        self.book_breakdown.setStyleSheet("font-size:13px;")
+        self._apply_breakdown_panel_styling(self.book_breakdown)
 
-        breakdown_grid.addWidget(market_label, 0, 0)
+        breakdown_grid.addWidget(self.market_label, 0, 0)
         breakdown_grid.addWidget(self.market_breakdown, 1, 0)
-        breakdown_grid.addWidget(book_label, 2, 0)
+        breakdown_grid.addWidget(self.book_label, 2, 0)
         breakdown_grid.addWidget(self.book_breakdown, 3, 0)
 
         stats_layout.addStretch(1)
@@ -2249,6 +2260,150 @@ class AnalyticsWindow(QMainWindow):
         button_layout.addStretch(1)
         button_layout.addWidget(self.close_button)
         main_layout.addLayout(button_layout)
+
+    def _apply_stats_panel_style(self, stats_panel: QFrame) -> None:
+        """Apply theme-aware styling to the statistics summary panel."""
+        if self.current_theme == 'light':
+            # Light mode styling
+            bg_color_start = "rgba(240, 245, 250, 240)"
+            bg_color_end = "rgba(225, 235, 245, 240)"
+            border_color = "rgba(100, 120, 140, 80)"
+        else:
+            # Dark mode styling
+            bg_color_start = "rgba(30, 30, 30, 220)"
+            bg_color_end = "rgba(20, 20, 20, 220)"
+            border_color = "rgba(255, 255, 255, 30)"
+        
+        stats_panel.setStyleSheet(
+            "#analyticsSummary {"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+            f"stop:0 {bg_color_start}, stop:1 {bg_color_end});"
+            f"border: 1px solid {border_color};"
+            "border-radius: 10px;"
+            "}"
+        )
+
+    def _set_outlook_badge_default_style(self) -> None:
+        """Set the default styling for the outlook badge based on theme."""
+        if self.current_theme == 'light':
+            bg_color = "rgba(220, 225, 235, 200)"
+            text_color = "#1a1a2e"
+        else:
+            bg_color = "rgba(255, 255, 255, 24)"
+            text_color = "#ffffff"
+        
+        self.outlook_badge.setStyleSheet(
+            f"padding:8px 14px;border-radius:12px;background:{bg_color};"
+            f"font-weight:800;font-size:20px;color:{text_color};"
+        )
+
+    def apply_theme(self, theme: str, palette: Optional[Dict[str, str]] = None) -> None:
+        """Update the Analytics window to use a different theme."""
+        self.current_theme = theme
+        self.palette_colors = palette or PALETTES.get(theme, PALETTE)
+        
+        # Update stats panel styling
+        if hasattr(self, 'stats_panel'):
+            self._apply_stats_panel_style(self.stats_panel)
+        
+        # Update outlook badge default styling
+        if hasattr(self, 'outlook_badge'):
+            self._set_outlook_badge_default_style()
+        
+        # Update all label colors
+        self._update_all_label_styles()
+        
+        # Update plot widget styling
+        if hasattr(self, 'plot_widget'):
+            self._apply_plot_widget_styling()
+        
+        # Update breakdown panels
+        if hasattr(self, 'market_breakdown'):
+            self._apply_breakdown_panel_styling(self.market_breakdown)
+        if hasattr(self, 'book_breakdown'):
+            self._apply_breakdown_panel_styling(self.book_breakdown)
+        
+        # Refresh the plot to update colors based on new palette
+        if hasattr(self, 'plot_widget'):
+            self._refresh_stats()
+
+    def _update_hint_label_style(self) -> None:
+        """Update the hint label color based on theme."""
+        if self.current_theme == 'light':
+            color = "rgba(100, 110, 120, 200)"
+        else:
+            color = "rgba(150, 150, 150, 200)"
+        self.hint_label.setStyleSheet(f"font-size:11px;color:{color};")
+
+    def _apply_plot_widget_styling(self) -> None:
+        """Apply theme-aware background and styling to the plot widget."""
+        if self.current_theme == 'light':
+            bg_color = QColor(248, 250, 252, 255)  # Light background
+            grid_color = QColor(200, 210, 220, 255)  # Darker grid for light mode
+        else:
+            bg_color = QColor(15, 23, 42, 255)  # Dark background
+            grid_color = None  # Use default for dark mode
+        
+        self.plot_widget.setBackground(bg_color)
+        
+        # Update axis label color
+        if self.current_theme == 'light':
+            self.plot_widget.getAxis('bottom').setPen(pg.mkPen(color='black', width=1))
+            self.plot_widget.getAxis('left').setPen(pg.mkPen(color='black', width=1))
+        else:
+            self.plot_widget.getAxis('bottom').setPen(pg.mkPen(color='white', width=1))
+            self.plot_widget.getAxis('left').setPen(pg.mkPen(color='white', width=1))
+
+    def _apply_breakdown_panel_styling(self, panel: QPlainTextEdit) -> None:
+        """Apply theme-aware styling to breakdown text panels."""
+        if self.current_theme == 'light':
+            bg_color = "rgba(242, 245, 250, 255)"
+            text_color = "#1a1a2e"
+            border_color = "rgba(200, 210, 220, 150)"
+        else:
+            bg_color = "rgba(20, 20, 30, 255)"
+            text_color = "#e5e7eb"
+            border_color = "rgba(100, 100, 120, 100)"
+        
+        stylesheet = (
+            f"QPlainTextEdit {{"
+            f"background-color: {bg_color};"
+            f"color: {text_color};"
+            f"border: 1px solid {border_color};"
+            f"border-radius: 4px;"
+            f"padding: 6px;"
+            f"font-size: 13px;"
+            f"}}"
+        )
+        panel.setStyleSheet(stylesheet)
+
+    def _update_stat_key_label_style(self, label: QLabel) -> None:
+        """Update stat key label color based on theme."""
+        if self.current_theme == 'light':
+            color = "rgba(100, 110, 120, 200)"
+        else:
+            color = "rgba(150, 150, 150, 200)"
+        label.setStyleSheet(f"color:{color}; font-size:18px;")
+
+    def _update_breakdown_label_style(self, label: QLabel) -> None:
+        """Update breakdown label color based on theme."""
+        if self.current_theme == 'light':
+            color = "rgba(100, 110, 120, 200)"
+        else:
+            color = "rgba(150, 150, 150, 200)"
+        label.setStyleSheet(f"color:{color}; font-size:14px;")
+
+    def _update_all_label_styles(self) -> None:
+        """Update all label styles for the current theme."""
+        if hasattr(self, 'hint_label'):
+            self._update_hint_label_style()
+        if hasattr(self, 'stat_key_labels'):
+            for label in self.stat_key_labels:
+                self._update_stat_key_label_style(label)
+        if hasattr(self, 'market_label'):
+            self._update_breakdown_label_style(self.market_label)
+        if hasattr(self, 'book_label'):
+            self._update_breakdown_label_style(self.book_label)
 
     def _wire_filter_labels(self):
         def _set_kelly(val: int):
@@ -2571,11 +2726,8 @@ class AnalyticsWindow(QMainWindow):
 
     def _set_outlook_badge(self, mean_val: Optional[float], median_val: Optional[float] = None, prob_loss: Optional[float] = None):
         if mean_val is None or median_val is None or prob_loss is None:
+            self._set_outlook_badge_default_style()
             self.outlook_badge.setText("Outlook: --")
-            self.outlook_badge.setStyleSheet(
-                "padding:8px 14px;border-radius:12px;background:rgba(255,255,255,24);"
-                "font-weight:800;font-size:20px;"
-            )
             return
 
         positive_ev = mean_val > 0
@@ -2583,18 +2735,34 @@ class AnalyticsWindow(QMainWindow):
         low_loss_prob = prob_loss < 0.5
         good_signals = sum([positive_ev, positive_median, low_loss_prob])
 
-        if good_signals >= 3:
-            label = "Outlook: Favorable"
-            color = "rgba(60, 200, 120, 190)"
-            text_color = "#0b0b0b"
-        elif good_signals <= 1:
-            label = "Outlook: Risky"
-            color = "rgba(220, 80, 80, 190)"
-            text_color = "#0b0b0b"
+        if self.current_theme == 'light':
+            # Light mode colors
+            if good_signals >= 3:
+                label = "Outlook: Favorable"
+                color = "rgba(100, 180, 120, 220)"
+                text_color = "#0b0b0b"
+            elif good_signals <= 1:
+                label = "Outlook: Risky"
+                color = "rgba(220, 100, 100, 220)"
+                text_color = "#0b0b0b"
+            else:
+                label = "Outlook: Mixed"
+                color = "rgba(220, 160, 80, 220)"
+                text_color = "#0b0b0b"
         else:
-            label = "Outlook: Mixed"
-            color = "rgba(240, 180, 80, 190)"
-            text_color = "#0b0b0b"
+            # Dark mode colors
+            if good_signals >= 3:
+                label = "Outlook: Favorable"
+                color = "rgba(60, 200, 120, 190)"
+                text_color = "#0b0b0b"
+            elif good_signals <= 1:
+                label = "Outlook: Risky"
+                color = "rgba(220, 80, 80, 190)"
+                text_color = "#0b0b0b"
+            else:
+                label = "Outlook: Mixed"
+                color = "rgba(240, 180, 80, 190)"
+                text_color = "#0b0b0b"
 
         self.outlook_badge.setText(label)
         self.outlook_badge.setStyleSheet(
@@ -2617,10 +2785,18 @@ class AnalyticsWindow(QMainWindow):
         prob_loss_half: float,
         ruin_half: float,
     ):
-        positive = "color: rgba(80, 220, 140, 230); font-weight:900; font-size:20px;"
-        negative = "color: rgba(235, 110, 110, 230); font-weight:900; font-size:20px;"
-        neutral = "color: rgba(230, 230, 230, 230); font-weight:900; font-size:20px;"
-        warn = "color: rgba(240, 190, 80, 230); font-weight:900; font-size:20px;"
+        if self.current_theme == 'light':
+            # Light mode colors
+            positive = "color: rgba(60, 150, 100, 230); font-weight:900; font-size:20px;"
+            negative = "color: rgba(200, 60, 60, 230); font-weight:900; font-size:20px;"
+            neutral = "color: rgba(80, 100, 120, 230); font-weight:900; font-size:20px;"
+            warn = "color: rgba(200, 120, 40, 230); font-weight:900; font-size:20px;"
+        else:
+            # Dark mode colors
+            positive = "color: rgba(80, 220, 140, 230); font-weight:900; font-size:20px;"
+            negative = "color: rgba(235, 110, 110, 230); font-weight:900; font-size:20px;"
+            neutral = "color: rgba(230, 230, 230, 230); font-weight:900; font-size:20px;"
+            warn = "color: rgba(240, 190, 80, 230); font-weight:900; font-size:20px;"
 
         self.stats_labels["Mean P/L"][0].setStyleSheet(positive if mean_val > 0 else negative if mean_val < 0 else neutral)
         self.stats_labels["Median P/L"][0].setStyleSheet(positive if median_val > 0 else negative if median_val < 0 else neutral)
